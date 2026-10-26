@@ -28,8 +28,21 @@ interface Operation {
   user_id: number;
   agent_id: string;
   thread_id: string;
-  status: "COMPLETED" | "EMPTY";
+  status:
+    | "VALIDATING"
+    | "RETRIEVING"
+    | "GENERATING"
+    | "COMPLETED"
+    | "EMPTY"
+    | "DENIED"
+    | "FAILED"
+    | "CANCELLED"
+    | "INTERRUPTED";
 }
+type EvidenceList =
+  | { kind: "pending" }
+  | { kind: "stopped" }
+  | { kind: "complete" | "empty"; rows: Evidence[] };
 type ErrorKind = "access" | "source" | "cursor" | "other";
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -63,7 +76,15 @@ function validOperation(
     (value.connection_id === null ||
       (typeof value.connection_id === "string" &&
         uuid4.test(value.connection_id))) &&
-    (value.status === "COMPLETED" || value.status === "EMPTY")
+    (value.status === "VALIDATING" ||
+      value.status === "RETRIEVING" ||
+      value.status === "GENERATING" ||
+      value.status === "COMPLETED" ||
+      value.status === "EMPTY" ||
+      value.status === "DENIED" ||
+      value.status === "FAILED" ||
+      value.status === "CANCELLED" ||
+      value.status === "INTERRUPTED")
   );
 }
 function validUtc(value: unknown): value is string {
@@ -173,7 +194,7 @@ function parseEvidenceList(
   value: unknown,
   operationId: string,
   target: PluginToolContext,
-): Evidence[] | null {
+): EvidenceList | null {
   if (
     !object(value) ||
     value.schema_id !== schemaId ||
@@ -183,14 +204,30 @@ function parseEvidenceList(
     return null;
   const operation = value.operation;
   if (!validOperation(operation, operationId, target)) return null;
+  if (
+    operation.status === "VALIDATING" ||
+    operation.status === "RETRIEVING" ||
+    operation.status === "GENERATING"
+  )
+    return { kind: "pending" };
+  if (
+    operation.status === "DENIED" ||
+    operation.status === "FAILED" ||
+    operation.status === "CANCELLED" ||
+    operation.status === "INTERRUPTED"
+  )
+    return { kind: "stopped" };
   const rows = value.evidence.map((item) =>
     parseEvidence(item, operationId, target, operation.user_id),
   );
   if (rows.some((item) => item === null)) return null;
   const parsed = rows as Evidence[];
-  return new Set(parsed.map((row) => row.evidence_id)).size === parsed.length
-    ? parsed
-    : null;
+  if (new Set(parsed.map((row) => row.evidence_id)).size !== parsed.length)
+    return null;
+  return {
+    kind: operation.status === "EMPTY" ? "empty" : "complete",
+    rows: parsed,
+  };
 }
 function operationReference(value: unknown): string | null {
   return object(value) &&
@@ -245,6 +282,8 @@ function currentTarget(
 export function EvidenceRenderer(props: PluginToolProps) {
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [autoRefreshStopped, setAutoRefreshStopped] = useState(false);
   const [listError, setListError] = useState<ErrorKind | null>(null);
   const [timezone, setTimezone] = useState<string | null>(null);
   const [timezoneReady, setTimezoneReady] = useState(false);
@@ -252,6 +291,8 @@ export function EvidenceRenderer(props: PluginToolProps) {
   const sequence = useRef(0);
   const denied = useRef(false);
   const mountController = useRef<AbortController | null>(null);
+  const listController = useRef<AbortController | null>(null);
+  const manualRefresh = useRef<(() => void) | null>(null);
   const operationId = operationReference(props.data);
   const target = currentTarget(props.host);
   const active =
@@ -268,7 +309,7 @@ export function EvidenceRenderer(props: PluginToolProps) {
     ? stateEvidenceId(props.presentation?.state, operationId)
     : null;
 
-  async function reload(signal?: AbortSignal): Promise<Evidence[]> {
+  async function fetchList(signal?: AbortSignal): Promise<EvidenceList> {
     if (!target || !operationId)
       throw new Error("Evidence context unavailable");
     const result = await toolAction<unknown>(
@@ -278,71 +319,220 @@ export function EvidenceRenderer(props: PluginToolProps) {
       { schema_id: schemaId, version: 1, operation_id: operationId },
       signal,
     );
-    const rows = parseEvidenceList(result, operationId, target);
-    if (!rows) throw new Error("Invalid evidence list");
-    return rows;
+    const list = parseEvidenceList(result, operationId, target);
+    if (!list) throw new Error("Invalid evidence list");
+    return list;
+  }
+  async function reload(signal?: AbortSignal): Promise<Evidence[]> {
+    const list = await fetchList(signal);
+    if (list.kind !== "complete" && list.kind !== "empty")
+      throw new Error("Evidence operation is not complete");
+    return list.rows;
   }
   useEffect(() => {
     if (denied.current) return;
     const id = ++sequence.current;
-    const controller = new AbortController();
-    mountController.current = controller;
+    let zoneController: AbortController | null = new AbortController();
+    mountController.current = zoneController;
+    let requestController: AbortController | null = null;
+    const listControllers: AbortController[] = [];
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+    let deadline: number | null = null;
+    let delay = 250;
+    let pendingOperation = false;
+    let automaticStopped = false;
+    let started = false;
+    let hidden = document.visibilityState === "hidden";
     const isCurrent = () =>
       sequence.current === id &&
-      !controller.signal.aborted &&
       active &&
       currentTarget(props.host)?.agentId === target?.agentId &&
       currentTarget(props.host)?.threadId === target?.threadId;
+    const clearRetry = () => {
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+    const stopAutomatic = () => {
+      automaticStopped = true;
+      clearRetry();
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+      requestController?.abort();
+      if (pendingOperation && isCurrent()) setAutoRefreshStopped(true);
+    };
+    const startDeadlineTimer = () => {
+      if (deadlineTimer === null && !automaticStopped && deadline !== null)
+        deadlineTimer = setTimeout(
+          stopAutomatic,
+          Math.max(0, deadline - Date.now()),
+        );
+    };
+    const applyList = (list: EvidenceList, manual: boolean) => {
+      if (list.kind === "pending") {
+        if (deadline === null) deadline = Date.now() + 30_000;
+        pendingOperation = true;
+        setPending(true);
+        setEvidence([]);
+        setSelected(null);
+        setListError(null);
+        setLoading(false);
+        if (!manual && !automaticStopped) startDeadlineTimer();
+        if (manual) {
+          automaticStopped = true;
+          setAutoRefreshStopped(true);
+        } else if (!automaticStopped && !hidden) {
+          if (Date.now() >= deadline) stopAutomatic();
+          else {
+            retryTimer = setTimeout(() => void requestList(false), delay);
+            delay = Math.min(2_000, delay * 2);
+          }
+        }
+        return;
+      }
+      pendingOperation = false;
+      automaticStopped = true;
+      clearRetry();
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+      setPending(false);
+      setAutoRefreshStopped(false);
+      setLoading(false);
+      if (list.kind === "stopped") {
+        setEvidence([]);
+        setSelected(null);
+        setListError("other");
+        return;
+      }
+      setEvidence(list.rows);
+      setListError(null);
+      if (selectedFromState) {
+        const found = list.rows.find(
+          (row) => row.evidence_id === selectedFromState,
+        );
+        if (found) setSelected(found);
+        else setListError("other");
+      }
+    };
+    const requestList = async (manual: boolean) => {
+      if (
+        !isCurrent() ||
+        hidden ||
+        requestController ||
+        (!manual && automaticStopped)
+      )
+        return;
+      if (!manual && deadline !== null && Date.now() >= deadline) {
+        stopAutomatic();
+        return;
+      }
+      const request = new AbortController();
+      requestController = request;
+      listController.current = request;
+      listControllers.push(request);
+      if (!started) setLoading(true);
+      try {
+        const list = await fetchList(request.signal);
+        if (!isCurrent() || request.signal.aborted || hidden) return;
+        started = true;
+        applyList(list, manual);
+      } catch (error) {
+        if (!isCurrent() || request.signal.aborted || hidden) return;
+        const kind = errorKind(error);
+        if (kind === "access") {
+          denyMount();
+          return;
+        }
+        pendingOperation = false;
+        automaticStopped = true;
+        clearRetry();
+        if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+        setPending(false);
+        setAutoRefreshStopped(false);
+        setEvidence([]);
+        setSelected(null);
+        setListError(kind);
+        setLoading(false);
+      } finally {
+        if (requestController === request) {
+          requestController = null;
+          listController.current = null;
+        }
+      }
+    };
+    const loadTimezone = () => {
+      if (!isCurrent() || hidden) return;
+      if (!zoneController || zoneController.signal.aborted) {
+        zoneController = new AbortController();
+        mountController.current = zoneController;
+      }
+      const request = zoneController;
+      void props.host
+        .request<{ timezone?: unknown }>("/settings/timezone", {
+          signal: request.signal,
+        })
+        .then((value) => {
+          if (isCurrent() && !hidden)
+            setTimezone(validTimezone(value?.timezone));
+        })
+        .catch((error: unknown) => {
+          if (!isCurrent() || hidden || request.signal.aborted) return;
+          if (errorKind(error) === "access") denyMount();
+        })
+        .finally(() => {
+          if (isCurrent() && !hidden && !request.signal.aborted)
+            setTimezoneReady(true);
+        });
+    };
+    const onVisibilityChange = () => {
+      hidden = document.visibilityState === "hidden";
+      if (hidden) {
+        clearRetry();
+        if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+        requestController?.abort();
+        zoneController?.abort();
+        return;
+      }
+      startDeadlineTimer();
+      loadTimezone();
+      if (!started) void requestList(false);
+      else if (pendingOperation && !automaticStopped) {
+        if (deadline !== null && Date.now() >= deadline) stopAutomatic();
+        else void requestList(false);
+      }
+    };
     setEvidence([]);
     setSelected(null);
     setListError(null);
+    setPending(false);
+    setAutoRefreshStopped(false);
     setTimezone(null);
     setTimezoneReady(false);
     if (!active || !target || !operationId) {
       setLoading(false);
-      return () => controller.abort();
+      return () => zoneController?.abort();
     }
-    setLoading(true);
-    void Promise.allSettled([
-      toolAction<unknown>(
-        props.host,
-        target,
-        "evidence.list",
-        { schema_id: schemaId, version: 1, operation_id: operationId },
-        controller.signal,
-      ),
-      props.host.request<{ timezone?: unknown }>("/settings/timezone", {
-        signal: controller.signal,
-      }),
-    ]).then(([listResult, zoneResult]) => {
-      if (!isCurrent()) return;
-      if (listResult.status === "fulfilled") {
-        const rows = parseEvidenceList(listResult.value, operationId, target);
-        if (rows) {
-          setEvidence(rows);
-          if (selectedFromState) {
-            const found = rows.find(
-              (row) => row.evidence_id === selectedFromState,
-            );
-            if (found) setSelected(found);
-            else setListError("other");
-          }
-        } else setListError("other");
-      } else if (errorKind(listResult.reason) === "access") denyMount();
-      else setListError(errorKind(listResult.reason));
-      if (zoneResult.status === "fulfilled")
-        setTimezone(validTimezone(zoneResult.value?.timezone));
-      else if (errorKind(zoneResult.reason) === "access") {
-        denyMount();
-      }
-      setTimezoneReady(true);
-      setLoading(false);
-    });
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    manualRefresh.current = () => void requestList(true);
+    loadTimezone();
+    if (!hidden) {
+      started = false;
+      void requestList(false);
+    }
     return () => {
       ++sequence.current;
-      controller.abort();
+      clearRetry();
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      zoneController?.abort();
+      requestController?.abort();
       mountController.current?.abort();
+      listControllers.forEach((request) => request.abort());
       mountController.current = null;
+      listController.current = null;
+      manualRefresh.current = null;
     };
   }, [
     props.host,
@@ -375,6 +565,7 @@ export function EvidenceRenderer(props: PluginToolProps) {
     denied.current = true;
     ++sequence.current;
     mountController.current?.abort();
+    listController.current?.abort();
     setEvidence([]);
     setSelected(null);
     setListError("access");
@@ -382,40 +573,7 @@ export function EvidenceRenderer(props: PluginToolProps) {
   };
   const reloadList = async () => {
     if (denied.current) return;
-    const requestSequence = sequence.current;
-    const controller = new AbortController();
-    mountController.current?.abort();
-    mountController.current = controller;
-    setLoading(true);
-    setListError(null);
-    try {
-      const rows = await reload(controller.signal);
-      if (
-        denied.current ||
-        sequence.current !== requestSequence ||
-        currentTarget(props.host)?.agentId !== target?.agentId ||
-        currentTarget(props.host)?.threadId !== target?.threadId
-      )
-        return;
-      setEvidence(rows);
-      setLoading(false);
-    } catch (error) {
-      if (
-        sequence.current !== requestSequence ||
-        currentTarget(props.host)?.agentId !== target?.agentId ||
-        currentTarget(props.host)?.threadId !== target?.threadId
-      )
-        return;
-      const kind = errorKind(error);
-      if (kind === "access") {
-        denyMount();
-        return;
-      }
-      setEvidence([]);
-      setSelected(null);
-      setListError(kind);
-      setLoading(false);
-    }
+    manualRefresh.current?.();
   };
   return (
     <section aria-label={t(locale, "evidenceReadLabel")}>
@@ -423,6 +581,16 @@ export function EvidenceRenderer(props: PluginToolProps) {
         <p role="status" aria-live="polite">
           {t(locale, "evidenceLoading")}
         </p>
+      )}
+      {pending && !listError && (
+        <div role="status" aria-live="polite">
+          <p>{t(locale, "evidencePending")}</p>
+          {autoRefreshStopped && (
+            <button type="button" onClick={() => void reloadList()}>
+              {t(locale, "evidenceRefresh")}
+            </button>
+          )}
+        </div>
       )}
       {listError && (
         <div role="status" aria-live="polite">
@@ -434,7 +602,7 @@ export function EvidenceRenderer(props: PluginToolProps) {
           )}
         </div>
       )}
-      {!loading && !listError && evidence.length === 0 && (
+      {!loading && !pending && !listError && evidence.length === 0 && (
         <p role="status">{t(locale, "evidenceEmpty")}</p>
       )}
       {!listError && (
@@ -470,6 +638,12 @@ export function EvidenceRenderer(props: PluginToolProps) {
                 </button>
                 {item.source_kind === "WEB" && (
                   <>
+                    <p>
+                      {item.provider === "FIRECRAWL" ? "Firecrawl" : "SearXNG"}
+                    </p>
+                    {item.degraded && (
+                      <p>{t(locale, "evidenceFallbackUsed")}</p>
+                    )}
                     <p>{item.content}</p>
                     <p>{t(locale, "evidenceWebUntrusted")}</p>
                   </>

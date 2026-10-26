@@ -18,7 +18,9 @@ describe("plugin action transport", () => {
       "/plugins/enterprise-knowledge/actions/settings.get",
       expect.objectContaining({
         method: "POST",
-        headers: expect.objectContaining({ "Content-Type": "application/json" }),
+        headers: expect.objectContaining({
+          "Content-Type": "application/json",
+        }),
         body: JSON.stringify({
           api_version: 1,
           context: { agent_id: "expert-a", thread_id: null },

@@ -1,5 +1,7 @@
 # Next-stage acceptance（N08 / M3 本地）
 
+> 2026-10-26 后续更新：本文保留早期执行记录；唯一开发目录已统一为 `E:\git\octop`。本地真实安装/浏览器和最新质量门槛见 [UI验收记录](ui-installed-acceptance.md)，第5节第1～3项已有本轮本地验收证据；真实供应商仍待人工，私库剩余实现另行推进。不要继续把下文旧worktree和早期待验描述当作当前状态。
+
 日期：2026-10-26。Worktree：`C:\Users\Administrator\.codex\worktrees\enterprise-p1\octop`。基线起点 HEAD：`6dcdb896`（功能未提交）。执行者：Cursor Composer（非 GPT-6 Luna）。
 
 **结论：** 本阶段本地代码闭环（M1 搜索设置 → M2 KB composer → M3 三模式/批准/主备/证据生命周期）已有非零自动化断言与命令退出码。**未**宣称 Alpha.1 发布完成；**未**把 mock 截图写作真实供应商/WeKnora PASS；OpenSpec 大项仍按原条件未整项勾满。

@@ -187,7 +187,14 @@ function savedClick(button: HTMLElement) {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
   target.locale = "en";
+  target.agentId = "agent-live";
+  target.threadId = "thread-live";
 });
 
 it("renders only fresh registered evidence and never turns null page into page one", async () => {
@@ -259,6 +266,296 @@ it("shows a localized empty list for a completed empty operation", async () => {
   ).toBeTruthy();
 });
 
+it("keeps partial evidence pending until the authenticated operation completes", async () => {
+  await setupGlobals();
+  vi.useFakeTimers();
+  let lists = 0;
+  const { value, requests } = props(
+    {},
+    {
+      list: () =>
+        ++lists === 1
+          ? listResponse([evidenceRecord()], "GENERATING")
+          : listResponse(),
+    },
+  );
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+
+  await act(async () => Promise.resolve());
+  expect(screen.getByText("Evidence is still being prepared…")).toBeTruthy();
+  expect(screen.queryByText("No authorized evidence is available.")).toBeNull();
+  expect(screen.queryByText("Registered title")).toBeNull();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  expect(screen.getByText("Registered title")).toBeTruthy();
+  expect(lists).toBe(2);
+  expect(
+    requests
+      .filter(({ path }) => path.includes("/actions/"))
+      .map(({ path }) => path.split("/actions/")[1]),
+  ).toEqual(["evidence.list", "evidence.list"]);
+});
+
+it("aborts the in-flight automatic check at 30 seconds and keeps manual refresh available", async () => {
+  await setupGlobals();
+  vi.useFakeTimers();
+  const delayedList = deferred<unknown>();
+  let lists = 0;
+  const { value, requests } = props(
+    {},
+    {
+      list: () => {
+        lists += 1;
+        if (lists === 1) return listResponse([], "RETRIEVING");
+        if (lists === 2) return delayedList.promise;
+        return listResponse();
+      },
+    },
+  );
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+  await act(async () => Promise.resolve());
+  expect(screen.getByText("Evidence is still being prepared…")).toBeTruthy();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  const pollSignal = requests.filter(({ path }) =>
+    path.endsWith("/evidence.list"),
+  )[1]?.init?.signal;
+  expect(lists).toBe(2);
+  expect(pollSignal?.aborted).toBe(false);
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(29_750);
+  });
+  expect(pollSignal?.aborted).toBe(true);
+  expect(screen.getByText("Evidence is still being prepared…")).toBeTruthy();
+  expect(screen.queryByText("No authorized evidence is available.")).toBeNull();
+  const refresh = screen.getByRole("button", { name: "Check evidence again" });
+
+  await act(async () => {
+    delayedList.resolve(listResponse([], "GENERATING"));
+    await Promise.resolve();
+  });
+  fireEvent.click(refresh);
+  await act(async () => Promise.resolve());
+  expect(screen.getByText("Registered title")).toBeTruthy();
+  expect(lists).toBe(3);
+});
+
+it.each(["DENIED", "FAILED", "CANCELLED", "INTERRUPTED", "UNKNOWN"])(
+  "does not poll or trust evidence for operation state %s",
+  async (status) => {
+    await setupGlobals();
+    vi.useFakeTimers();
+    let lists = 0;
+    const { value } = props(
+      {},
+      {
+        list: () => {
+          lists += 1;
+          return listResponse([evidenceRecord()], status);
+        },
+      },
+    );
+    render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+    await act(async () => Promise.resolve());
+    expect(screen.queryByText("Registered title")).toBeNull();
+    expect(screen.getByText("Evidence could not be loaded.")).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(lists).toBe(1);
+  },
+);
+
+it("stops automatic polling on access denial and does not offer a manual bypass", async () => {
+  await setupGlobals();
+  vi.useFakeTimers();
+  let lists = 0;
+  const { value } = props(
+    {},
+    {
+      list: () => {
+        lists += 1;
+        if (lists === 1) return listResponse([], "VALIDATING");
+        throw new Error(
+          'Request failed: 403 Forbidden - {"error":{"code":"ACCESS_DENIED"}}',
+        );
+      },
+    },
+  );
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+  await act(async () => Promise.resolve());
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  expect(
+    screen.getByText(
+      "Access changed. Reopen this result to check authorization.",
+    ),
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("button", { name: "Check evidence again" }),
+  ).toBeNull();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(lists).toBe(2);
+});
+
+it("aborts an automatic evidence check while the document is hidden", async () => {
+  await setupGlobals();
+  vi.useFakeTimers();
+  const delayedList = deferred<unknown>();
+  let lists = 0;
+  const { value, requests } = props(
+    {},
+    {
+      list: () => {
+        lists += 1;
+        return lists === 1
+          ? listResponse([], "GENERATING")
+          : delayedList.promise;
+      },
+    },
+  );
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+  await act(async () => Promise.resolve());
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  const pollSignal = requests.filter(({ path }) =>
+    path.endsWith("/evidence.list"),
+  )[1]?.init?.signal;
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "hidden",
+  });
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(pollSignal?.aborted).toBe(true);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(lists).toBe(2);
+  delayedList.resolve(listResponse());
+  await act(async () => Promise.resolve());
+  expect(screen.queryByText("Registered title")).toBeNull();
+});
+
+it("aborts automatic work when the mounted tool identity changes and ignores its late result", async () => {
+  await setupGlobals();
+  vi.useFakeTimers();
+  const delayedList = deferred<unknown>();
+  let lists = 0;
+  const { value, requests } = props(
+    {},
+    {
+      list: () => {
+        lists += 1;
+        return lists === 1
+          ? listResponse([], "GENERATING")
+          : delayedList.promise;
+      },
+    },
+  );
+  const mounted = render(
+    <EvidenceRenderer {...(value as unknown as PluginToolProps)} />,
+  );
+  await act(async () => Promise.resolve());
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  const pollSignal = requests.filter(({ path }) =>
+    path.endsWith("/evidence.list"),
+  )[1]?.init?.signal;
+  mounted.rerender(
+    <EvidenceRenderer
+      {...(value as unknown as PluginToolProps)}
+      toolName="other_tool"
+    />,
+  );
+  expect(pollSignal?.aborted).toBe(true);
+  delayedList.resolve(listResponse());
+  await act(async () => Promise.resolve());
+  expect(screen.queryByText("Registered title")).toBeNull();
+  expect(lists).toBe(2);
+});
+
+it("restarts under the new scope and discards a late poll from the old scope", async () => {
+  await setupGlobals();
+  vi.useFakeTimers();
+  const delayedList = deferred<unknown>();
+  let lists = 0;
+  const { value, requests } = props(
+    {},
+    {
+      list: () => {
+        lists += 1;
+        if (lists === 1) return listResponse([], "VALIDATING");
+        if (lists === 2) return delayedList.promise;
+        return listResponse();
+      },
+    },
+  );
+  const mounted = render(
+    <EvidenceRenderer {...(value as unknown as PluginToolProps)} />,
+  );
+  await act(async () => Promise.resolve());
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  const oldPollSignal = requests.filter(({ path }) =>
+    path.endsWith("/evidence.list"),
+  )[1]?.init?.signal;
+  target.agentId = "agent-next";
+  mounted.rerender(
+    <EvidenceRenderer {...(value as unknown as PluginToolProps)} />,
+  );
+  expect(oldPollSignal?.aborted).toBe(true);
+  await act(async () => Promise.resolve());
+  expect(screen.getByText("Registered title")).toBeTruthy();
+  delayedList.resolve(listResponse());
+  await act(async () => Promise.resolve());
+  expect(screen.getByText("Registered title")).toBeTruthy();
+  expect(lists).toBe(3);
+});
+
+it("aborts an automatic check on unmount and ignores its late completion", async () => {
+  await setupGlobals();
+  vi.useFakeTimers();
+  const delayedList = deferred<unknown>();
+  let lists = 0;
+  const { value, requests } = props(
+    {},
+    {
+      list: () => {
+        lists += 1;
+        return lists === 1
+          ? listResponse([], "GENERATING")
+          : delayedList.promise;
+      },
+    },
+  );
+  const mounted = render(
+    <EvidenceRenderer {...(value as unknown as PluginToolProps)} />,
+  );
+  await act(async () => Promise.resolve());
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  const pollSignal = requests.filter(({ path }) =>
+    path.endsWith("/evidence.list"),
+  )[1]?.init?.signal;
+  mounted.unmount();
+  expect(pollSignal?.aborted).toBe(true);
+  delayedList.resolve(listResponse());
+  await act(async () => Promise.resolve());
+  expect(lists).toBe(2);
+});
+
 it("renders authorization failures in Chinese when the mounted Host uses zh locale", async () => {
   await setupGlobals();
   target.locale = "zh-CN";
@@ -315,6 +612,80 @@ it("shows web evidence as untrusted text and never invokes knowledge reading", a
         path.endsWith("/evidence.read") || path.endsWith("/evidence.original"),
     ),
   ).toBe(false);
+});
+
+it.each([
+  {
+    locale: "en",
+    provider: "FIRECRAWL",
+    providerLabel: "Firecrawl",
+    fallbackLabel: "Switched to secondary source",
+  },
+  {
+    locale: "zh-CN",
+    provider: "SEARXNG",
+    providerLabel: "SearXNG",
+    fallbackLabel: "已切换至备源",
+  },
+])(
+  "shows the actual provider and localized fallback for degraded WEB evidence ($locale)",
+  async ({ locale, provider, providerLabel, fallbackLabel }) => {
+    await setupGlobals();
+    target.locale = locale;
+    const web = evidenceRecord({
+      source_kind: "WEB",
+      provider,
+      degraded: true,
+      connection_id: null,
+      kb_id: null,
+      knowledge_id: null,
+    });
+    const { value, requests } = props({}, { list: () => listResponse([web]) });
+    render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+
+    expect(await screen.findByText(providerLabel)).toBeTruthy();
+    expect(screen.getByText(fallbackLabel)).toBeTruthy();
+    expect(
+      requests.some(
+        ({ path }) =>
+          path.endsWith("/evidence.read") ||
+          path.endsWith("/evidence.original"),
+      ),
+    ).toBe(false);
+  },
+);
+
+it("shows a WEB provider without a fallback label when the result is not degraded", async () => {
+  await setupGlobals();
+  const web = evidenceRecord({
+    source_kind: "WEB",
+    provider: "SEARXNG",
+    degraded: false,
+    connection_id: null,
+    kb_id: null,
+    knowledge_id: null,
+  });
+  const { value } = props({}, { list: () => listResponse([web]) });
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+
+  expect(await screen.findByText("SearXNG")).toBeTruthy();
+  expect(screen.queryByText("Switched to secondary source")).toBeNull();
+});
+
+it("rejects WEB evidence with an unknown provider", async () => {
+  await setupGlobals();
+  const web = evidenceRecord({
+    source_kind: "WEB",
+    provider: "UNKNOWN",
+    connection_id: null,
+    kb_id: null,
+    knowledge_id: null,
+  });
+  const { value } = props({}, { list: () => listResponse([web]) });
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+
+  expect(await screen.findByText("Evidence could not be loaded.")).toBeTruthy();
+  expect(screen.queryByText("Registered title")).toBeNull();
 });
 
 it("reauthorizes a registered web locator before exposing its source link", async () => {

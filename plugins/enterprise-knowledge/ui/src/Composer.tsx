@@ -6,7 +6,7 @@ import type {
   PluginJsonObject,
   PluginSurfaceContext,
 } from "./host";
-import { classifyTransportError, contextKey } from "./api";
+import { classifyTransportError } from "./api";
 import { t, type MessageKey } from "./i18n";
 import { PublicQueryDialog } from "./PublicQueryDialog";
 import {
@@ -30,8 +30,12 @@ function errorCopy(error: unknown, locale: string): string {
   if (classified.status === 403) return t(locale, "denied");
   if (classified.status === 409 || classified.code === "CONFIG_CONFLICT")
     return t(locale, "conflict");
-  if (classified.code === "MODE_NOT_ALLOWED") return t(locale, "composerModeBlocked");
-  if (classified.code === "EMPTY_SELECTION" || classified.code === "SCOPE_EMPTY")
+  if (classified.code === "MODE_NOT_ALLOWED")
+    return t(locale, "composerModeBlocked");
+  if (
+    classified.code === "EMPTY_SELECTION" ||
+    classified.code === "SCOPE_EMPTY"
+  )
     return t(locale, "composerEmptyBlocksSend");
   return t(locale, "error");
 }
@@ -46,6 +50,20 @@ function sourceRevisions(session: SessionSnapshot) {
   };
 }
 
+function targetIsCurrent(
+  host: PluginHost,
+  target: { agentId: string; threadId: string },
+  generation: string,
+): boolean {
+  const current = host.getContext();
+  return Boolean(
+    current &&
+      current.agentId === target.agentId &&
+      current.generation === generation &&
+      (!current.threadId || current.threadId === target.threadId),
+  );
+}
+
 const MODES: KnowledgeMode[] = ["KB_ONLY", "WEB_ONLY", "HYBRID"];
 
 function modeLabel(mode: KnowledgeMode): MessageKey {
@@ -56,14 +74,12 @@ function modeLabel(mode: KnowledgeMode): MessageKey {
 
 function modeUnavailable(
   session: SessionSnapshot,
-  selected: string[],
   mode: KnowledgeMode,
 ): MessageKey | null {
   if (mode === session.mode && session.invalid) return "composerInvalidSource";
-  if (mode !== "WEB_ONLY" && selected.length === 0)
-    return "composerEmptyBlocksSend";
   if (mode === "KB_ONLY") {
-    return session.capabilities.knowledge_ready
+    return session.capabilities.knowledge_ready ||
+      session.capabilities.can_select_knowledge
       ? null
       : "composerKnowledgeNotReady";
   }
@@ -77,12 +93,15 @@ function modeUnavailable(
 
 type PublicQueryRequest = {
   operationId: string;
+  target: { agentId: string; threadId: string; generation: string };
+  signal: AbortSignal;
   trigger: HTMLElement | null;
   resolve: (approved: boolean) => void;
   removeAbortListener: () => void;
 };
 
 export function Composer({ host, context }: Props) {
+  const { agentId, threadId, generation } = context;
   const locale = context.locale;
   const text = (key: MessageKey) => t(locale, key);
   const [loading, setLoading] = React.useState(true);
@@ -99,11 +118,15 @@ export function Composer({ host, context }: Props) {
   const [queryPending, setQueryPending] = React.useState(false);
   const [queryError, setQueryError] = React.useState("");
   const loadGen = React.useRef(0);
+  const scopeRef = React.useRef({ agentId, threadId, generation });
+  scopeRef.current = { agentId, threadId, generation };
+  const stateGen = React.useRef(0);
   const sessionRef = React.useRef<SessionSnapshot | null>(null);
   const selectedRef = React.useRef<string[]>([]);
   const modeRef = React.useRef<KnowledgeMode>("KB_ONLY");
   const savingRef = React.useRef(false);
   const queryRequestRef = React.useRef<PublicQueryRequest | null>(null);
+  const focusTriggerRef = React.useRef<HTMLElement | null>(null);
   const queryPendingRef = React.useRef(false);
   const preparingGen = React.useRef<string | null>(null);
 
@@ -118,6 +141,7 @@ export function Composer({ host, context }: Props) {
   }, [mode]);
 
   const applySession = React.useCallback((next: SessionSnapshot) => {
+    stateGen.current += 1;
     setSession(next);
     setSelected([...next.selected_kb_ids]);
     setMode(next.mode);
@@ -128,8 +152,16 @@ export function Composer({ host, context }: Props) {
 
   const refresh = React.useCallback(async () => {
     const gen = ++loadGen.current;
-    const key = contextKey(context, "composer");
-    if (!context.agentId || !context.threadId) {
+    const key = `${generation}:${agentId ?? ""}:${threadId ?? ""}`;
+    const isScopeCurrent = () => {
+      const current = scopeRef.current;
+      return (
+        `${current.generation}:${current.agentId ?? ""}:${
+          current.threadId ?? ""
+        }` === key
+      );
+    };
+    if (!agentId || !threadId) {
       setLoading(false);
       setSession(null);
       setError("");
@@ -137,69 +169,117 @@ export function Composer({ host, context }: Props) {
       return;
     }
     setLoading(true);
+    setSaving(false);
+    savingRef.current = false;
+    setSession(null);
+    sessionRef.current = null;
+    setSelected([]);
+    selectedRef.current = [];
+    setCatalog([]);
     setError("");
     setConflict(false);
+    const refreshStateGen = stateGen.current;
     try {
-      let output = await getSession(host);
-      if (gen !== loadGen.current || contextKey(context, "composer") !== key)
-        return;
+      const target = {
+        agentId,
+        threadId,
+        generation,
+      };
+      let output = await getSession(host, target);
+      if (gen !== loadGen.current || !isScopeCurrent()) return;
       let snap = output.session;
-      if (!snap.selection_present) {
-        try {
-          output = await saveSession(host, {
-            expected_revision: 0,
-            selected_kb_ids: [...snap.selected_kb_ids],
-            mode: snap.mode,
-            source_revisions: sourceRevisions(snap),
-          });
-          snap = output.session;
-        } catch (err) {
-          const classified = classifyTransportError(err);
-          if (
-            classified.status === 409 ||
-            classified.code === "CONFIG_CONFLICT"
-          ) {
-            output = await getSession(host);
+      if (stateGen.current !== refreshStateGen) {
+        const activeSession = sessionRef.current;
+        if (!activeSession) return;
+        snap = activeSession;
+      } else {
+        if (
+          snap.agent_id !== target.agentId ||
+          snap.thread_id !== target.threadId
+        )
+          throw new Error("Composer context changed");
+        if (!snap.selection_present) {
+          try {
+            output = await saveSession(
+              host,
+              {
+                expected_revision: 0,
+                selected_kb_ids: [...snap.selected_kb_ids],
+                mode: snap.mode,
+                source_revisions: sourceRevisions(snap),
+              },
+              target,
+            );
             snap = output.session;
-          } else {
-            throw err;
+          } catch (err) {
+            const classified = classifyTransportError(err);
+            if (
+              classified.status === 409 ||
+              classified.code === "CONFIG_CONFLICT"
+            ) {
+              output = await getSession(host, target);
+              snap = output.session;
+            } else {
+              throw err;
+            }
           }
         }
       }
-      if (gen !== loadGen.current || contextKey(context, "composer") !== key)
-        return;
-      applySession(snap);
-      if (snap.connection_id) {
+      if (
+        snap.agent_id !== target.agentId ||
+        snap.thread_id !== target.threadId
+      )
+        throw new Error("Composer context changed");
+      if (stateGen.current !== refreshStateGen) {
+        const activeSession = sessionRef.current;
+        if (!activeSession) return;
+        snap = activeSession;
+      }
+      const fallbackKnowledgeIds = [...snap.selected_kb_ids];
+      if (gen !== loadGen.current || !isScopeCurrent()) return;
+      if (stateGen.current === refreshStateGen) applySession(snap);
+      if (snap.connection_id && snap.mode !== "WEB_ONLY") {
         try {
           const catalogResult = await loadCatalog(
             host,
             snap.connection_id,
             snap.config_revision,
+            target,
           );
           if (
             gen !== loadGen.current ||
-            contextKey(context, "composer") !== key
+            !isScopeCurrent() ||
+            sessionRef.current !== snap
           )
             return;
           setCatalog([...catalogResult.knowledge_bases]);
         } catch {
-          setCatalog(
-            snap.selected_kb_ids.map((kb_id) => ({ kb_id, name: kb_id })),
-          );
+          if (
+            gen === loadGen.current &&
+            isScopeCurrent() &&
+            sessionRef.current === snap
+          )
+            setCatalog(
+              fallbackKnowledgeIds.map((kb_id) => ({ kb_id, name: kb_id })),
+            );
         }
       } else {
         setCatalog([]);
       }
       setNotice(t(locale, "composerLoaded"));
     } catch (err) {
-      if (gen !== loadGen.current || contextKey(context, "composer") !== key)
+      if (
+        gen !== loadGen.current ||
+        !isScopeCurrent() ||
+        stateGen.current !== refreshStateGen
+      )
         return;
       setError(errorCopy(err, locale));
       setSession(null);
     } finally {
       if (gen === loadGen.current) setLoading(false);
     }
-  }, [applySession, context, host, locale]);
+  }, [agentId, applySession, generation, host, locale, threadId]);
 
   React.useEffect(() => {
     void refresh();
@@ -214,14 +294,53 @@ export function Composer({ host, context }: Props) {
     savingRef.current = true;
     setSaving(true);
     setError("");
+    const target = {
+      agentId: context.agentId!,
+      threadId: context.threadId!,
+      generation: context.generation,
+    };
+    const isCurrent = () => targetIsCurrent(host, target, target.generation);
     try {
-      const saved = await saveSession(host, {
-        expected_revision: session.revision,
-        selected_kb_ids: ids,
-        mode: nextMode,
-        source_revisions: sourceRevisions(session),
-      });
+      const saved = await saveSession(
+        host,
+        {
+          expected_revision: session.revision,
+          selected_kb_ids: ids,
+          mode: nextMode,
+          source_revisions: sourceRevisions(session),
+        },
+        target,
+      );
+      if (!isCurrent()) return;
       applySession(saved.session);
+      if (saved.session.mode === "WEB_ONLY") {
+        setCatalog([]);
+      } else if (saved.session.connection_id) {
+        try {
+          const result = await loadCatalog(
+            host,
+            saved.session.connection_id,
+            saved.session.config_revision,
+            target,
+          );
+          if (
+            isCurrent() &&
+            sessionRef.current?.revision === saved.session.revision
+          )
+            setCatalog([...result.knowledge_bases]);
+        } catch {
+          if (
+            isCurrent() &&
+            sessionRef.current?.revision === saved.session.revision
+          )
+            setCatalog(
+              saved.session.selected_kb_ids.map((kb_id) => ({
+                kb_id,
+                name: kb_id,
+              })),
+            );
+        }
+      }
       setNotice(
         ids.length === 0
           ? text("composerCleared")
@@ -229,6 +348,7 @@ export function Composer({ host, context }: Props) {
       );
       setConflict(false);
     } catch (err) {
+      if (!isCurrent()) return;
       const classified = classifyTransportError(err);
       if (classified.status === 409 || classified.code === "CONFIG_CONFLICT") {
         setConflict(true);
@@ -239,8 +359,10 @@ export function Composer({ host, context }: Props) {
       setMode(session.mode);
       modeRef.current = session.mode;
     } finally {
-      savingRef.current = false;
-      setSaving(false);
+      if (isCurrent()) {
+        savingRef.current = false;
+        setSaving(false);
+      }
     }
   };
 
@@ -248,7 +370,9 @@ export function Composer({ host, context }: Props) {
     const next = selected.includes(kbId)
       ? selected.filter((id) => id !== kbId)
       : [...selected, kbId];
+    stateGen.current += 1;
     setSelected(next);
+    selectedRef.current = next;
   };
 
   const finishQueryRequest = (approved: boolean) => {
@@ -261,25 +385,33 @@ export function Composer({ host, context }: Props) {
     queryPendingRef.current = false;
     setQueryError("");
     request.resolve(approved);
-    window.requestAnimationFrame(() => request.trigger?.focus());
+    window.requestAnimationFrame(() => {
+      const trigger = request.trigger;
+      if (
+        trigger?.isConnected &&
+        !trigger.matches(":disabled") &&
+        targetIsCurrent(host, request.target, request.target.generation)
+      )
+        trigger.focus();
+    });
   };
 
   const requestPublicQuery = (
     operationId: string,
+    target: PublicQueryRequest["target"],
     signal: AbortSignal,
   ): Promise<boolean> =>
     new Promise((resolve) => {
-      const trigger =
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : null;
+      const trigger = focusTriggerRef.current;
+      focusTriggerRef.current = null;
       const onAbort = () => finishQueryRequest(false);
       const request: PublicQueryRequest = {
         operationId,
+        target,
+        signal,
         trigger,
         resolve,
-        removeAbortListener: () =>
-          signal.removeEventListener("abort", onAbort),
+        removeAbortListener: () => signal.removeEventListener("abort", onAbort),
       };
       if (signal.aborted) {
         resolve(false);
@@ -297,6 +429,14 @@ export function Composer({ host, context }: Props) {
     if (typeof host.registerComposerPreparation !== "function") return;
     const handler: ComposerPreparationHandler = {
       captureSelection(): ComposerSelectionCapture {
+        const activeElement = document.activeElement;
+        focusTriggerRef.current =
+          activeElement instanceof HTMLElement &&
+          activeElement !== document.body &&
+          activeElement.isConnected
+            ? activeElement
+            : null;
+        const currentScope = scopeRef.current;
         const current = sessionRef.current;
         if (!current) return { state: "uninitialized" };
         return {
@@ -306,43 +446,176 @@ export function Composer({ host, context }: Props) {
             session_revision: current.revision,
             mode: modeRef.current,
             saving: savingRef.current,
+            agent_id: currentScope.agentId,
+            thread_id: currentScope.threadId,
+            generation: currentScope.generation,
           },
         };
       },
       async prepare(input) {
         preparingGen.current = input.generation;
+        const target = {
+          ...input.target,
+          generation: input.generation,
+        };
+        const currentScope = scopeRef.current;
         if (input.signal.aborted) {
           throw new Error("Composer preparation cancelled");
         }
-        if (input.selection.state !== "selected") {
-          throw new Error("Composer selection is uninitialized");
+        if (
+          target.agentId !== currentScope.agentId ||
+          (currentScope.threadId &&
+            target.threadId !== currentScope.threadId) ||
+          input.generation !== currentScope.generation ||
+          !targetIsCurrent(host, target, input.generation)
+        ) {
+          throw new Error("Composer context changed");
         }
-        const revision = Number(input.selection.value.session_revision);
-        const ids = input.selection.value.selected_kb_ids;
-        const selectedMode = String(input.selection.value.mode) as KnowledgeMode;
-        const current = sessionRef.current;
-        if (!current || !MODES.includes(selectedMode))
+        let captured = input.selection;
+        let current: SessionSnapshot;
+        if (captured.state === "uninitialized") {
+          const initialSession = sessionRef.current;
+          const initialIds = [...selectedRef.current];
+          const initialMode = modeRef.current;
+          const initialSaving = savingRef.current;
+          const initialLoadGen = loadGen.current;
+          const initializationStillCurrent = () =>
+            targetIsCurrent(host, target, input.generation) &&
+            loadGen.current === initialLoadGen &&
+            sessionRef.current === initialSession &&
+            savingRef.current === initialSaving &&
+            modeRef.current === initialMode &&
+            selectedRef.current.length === initialIds.length &&
+            selectedRef.current.every((id, index) => id === initialIds[index]);
+          let output = await getSession(host, target, input.signal);
+          if (!initializationStillCurrent())
+            throw new Error(t(locale, "composerUnsavedBlocksSend"));
+          current = output.session;
+          if (!current.selection_present) {
+            try {
+              output = await saveSession(
+                host,
+                {
+                  expected_revision: 0,
+                  selected_kb_ids: [...current.selected_kb_ids],
+                  mode: current.mode,
+                  source_revisions: sourceRevisions(current),
+                },
+                target,
+                input.signal,
+              );
+              current = output.session;
+              if (!initializationStillCurrent())
+                throw new Error(t(locale, "composerUnsavedBlocksSend"));
+            } catch (err) {
+              if (!initializationStillCurrent())
+                throw new Error(t(locale, "composerUnsavedBlocksSend"));
+              const classified = classifyTransportError(err);
+              if (
+                classified.status !== 409 &&
+                classified.code !== "CONFIG_CONFLICT"
+              )
+                throw err;
+              output = await getSession(host, target, input.signal);
+              if (!initializationStillCurrent())
+                throw new Error(t(locale, "composerUnsavedBlocksSend"));
+              current = output.session;
+            }
+          }
+          if (
+            current.agent_id !== target.agentId ||
+            current.thread_id !== target.threadId
+          )
+            throw new Error("Composer context changed");
+          if (
+            scopeRef.current.threadId === target.threadId &&
+            targetIsCurrent(host, target, input.generation)
+          ) {
+            applySession(current);
+          }
+          captured = {
+            state: "selected",
+            value: {
+              selected_kb_ids: [...current.selected_kb_ids],
+              session_revision: current.revision,
+              mode: current.mode,
+              saving: false,
+              agent_id: target.agentId,
+              thread_id: target.threadId,
+              generation: input.generation,
+            },
+          };
+        } else {
+          current = sessionRef.current as SessionSnapshot;
+        }
+        if (captured.state !== "selected")
+          throw new Error("Composer selection is uninitialized");
+        if (
+          captured.value.agent_id !== target.agentId ||
+          captured.value.thread_id !== target.threadId ||
+          captured.value.generation !== input.generation
+        )
+          throw new Error("Composer context changed");
+        const revision = Number(captured.value.session_revision);
+        const ids = captured.value.selected_kb_ids;
+        const selectedMode = String(captured.value.mode) as KnowledgeMode;
+        if (!MODES.includes(selectedMode))
           throw new Error(t(locale, "composerModeBlocked"));
         const selectedIds = Array.isArray(ids) ? ids.map(String) : [];
+        const matchesPersistedSelection =
+          selectedMode === current.mode &&
+          revision === current.revision &&
+          selectedIds.length === current.selected_kb_ids.length &&
+          selectedIds.every(
+            (id, index) => id === current.selected_kb_ids[index],
+          );
+        const hasCurrentDraft =
+          sessionRef.current?.agent_id === target.agentId &&
+          sessionRef.current.thread_id === target.threadId;
+        const matchesLiveDraft =
+          !hasCurrentDraft ||
+          (selectedMode === modeRef.current &&
+            selectedIds.length === selectedRef.current.length &&
+            selectedIds.every(
+              (id, index) => id === selectedRef.current[index],
+            ));
         if (
-          input.selection.value.saving === true ||
-          selectedMode !== current.mode ||
-          selectedIds.length !== current.selected_kb_ids.length ||
-          selectedIds.some((id, index) => id !== current.selected_kb_ids[index])
+          captured.value.saving === true ||
+          savingRef.current ||
+          !matchesPersistedSelection ||
+          !matchesLiveDraft
         ) {
           throw new Error(t(locale, "composerUnsavedBlocksSend"));
         }
-        const unavailable = modeUnavailable(current, selectedIds, selectedMode);
+        if (
+          !current ||
+          current.agent_id !== target.agentId ||
+          current.thread_id !== target.threadId
+        )
+          throw new Error("Composer selection is uninitialized");
+        const unavailable = modeUnavailable(current, selectedMode);
         if (unavailable) throw new Error(t(locale, unavailable));
+        if (selectedMode === "KB_ONLY" && !current.capabilities.knowledge_ready)
+          throw new Error(t(locale, "composerKnowledgeNotReady"));
+        if (selectedMode !== "WEB_ONLY" && selectedIds.length === 0)
+          throw new Error(t(locale, "composerEmptyBlocksSend"));
         if (!Number.isInteger(revision)) {
           throw new Error("Invalid session revision");
         }
-        const prepared = await prepareOperation(host, revision);
+        const prepared = await prepareOperation(
+          host,
+          revision,
+          target,
+          input.signal,
+        );
         if (input.signal.aborted) {
           throw new Error("Composer preparation cancelled");
         }
         // Ignore late prepare generations for UI mutation; host keeps result.
-        if (preparingGen.current !== input.generation) {
+        if (
+          preparingGen.current !== input.generation ||
+          !targetIsCurrent(host, target, input.generation)
+        ) {
           throw new Error("Composer preparation superseded");
         }
         const operationId = prepared.operation.operation_id;
@@ -351,7 +624,7 @@ export function Composer({ host, context }: Props) {
         }
         if (
           selectedMode !== "KB_ONLY" &&
-          !(await requestPublicQuery(operationId, input.signal))
+          !(await requestPublicQuery(operationId, target, input.signal))
         ) {
           throw new Error(t(locale, "publicQueryCancelled"));
         }
@@ -362,11 +635,13 @@ export function Composer({ host, context }: Props) {
         const ids = selection.value.selected_kb_ids;
         if (Array.isArray(ids)) {
           const restoredIds = ids.map(String);
+          stateGen.current += 1;
           setSelected(restoredIds);
           selectedRef.current = restoredIds;
         }
         const restoredMode = selection.value.mode;
         if (MODES.includes(restoredMode as KnowledgeMode)) {
+          stateGen.current += 1;
           setMode(restoredMode as KnowledgeMode);
           modeRef.current = restoredMode as KnowledgeMode;
         }
@@ -413,7 +688,7 @@ export function Composer({ host, context }: Props) {
       ? catalog
       : selected.map((kb_id) => ({ kb_id, name: kb_id }));
   const canEdit = session.capabilities.can_select_knowledge && !saving;
-  const selectedModeReason = modeUnavailable(session, selected, mode);
+  const selectedModeReason = modeUnavailable(session, mode);
   const emptyBlocks = mode !== "WEB_ONLY" && selected.length === 0;
 
   return (
@@ -429,12 +704,14 @@ export function Composer({ host, context }: Props) {
       )}
       <p role="status" className="ek-muted">
         {text("revision")}: {session.revision}
-        {session.invalid ? ` · ${session.invalid_reason ?? text("blocked")}` : ""}
+        {session.invalid
+          ? ` · ${session.invalid_reason ?? text("blocked")}`
+          : ""}
       </p>
       <fieldset>
         <legend>{text("composerMode")}</legend>
         {MODES.map((item) => {
-          const reason = modeUnavailable(session, selected, item);
+          const reason = modeUnavailable(session, item);
           const reasonId = `ek-mode-${item}-reason`;
           return (
             <div key={item}>
@@ -446,6 +723,7 @@ export function Composer({ host, context }: Props) {
                   disabled={saving || reason !== null}
                   aria-describedby={reason ? reasonId : undefined}
                   onChange={() => {
+                    stateGen.current += 1;
                     setMode(item);
                     modeRef.current = item;
                     void persistSelection(selected, item);
@@ -454,10 +732,7 @@ export function Composer({ host, context }: Props) {
                 {text(modeLabel(item))}
               </label>
               {reason && (
-                <span
-                  id={reasonId}
-                  className="ek-muted ek-mode-reason"
-                >
+                <span id={reasonId} className="ek-muted ek-mode-reason">
                   {text(reason)}
                 </span>
               )}
@@ -467,9 +742,7 @@ export function Composer({ host, context }: Props) {
       </fieldset>
       <fieldset disabled={!canEdit}>
         <legend>{text("composerSelectKb")}</legend>
-        {items.length === 0 && (
-          <p role="status">{text("composerNoCatalog")}</p>
-        )}
+        {items.length === 0 && <p role="status">{text("composerNoCatalog")}</p>}
         {items.map((item) => (
           <label key={item.kb_id} className="ek-choice">
             <input
@@ -481,9 +754,7 @@ export function Composer({ host, context }: Props) {
           </label>
         ))}
       </fieldset>
-      {emptyBlocks && (
-        <p role="status">{text("composerEmptyBlocksSend")}</p>
-      )}
+      {emptyBlocks && <p role="status">{text("composerEmptyBlocksSend")}</p>}
       {!emptyBlocks && selectedModeReason && (
         <p role="status">{text(selectedModeReason)}</p>
       )}
@@ -518,9 +789,26 @@ export function Composer({ host, context }: Props) {
             queryPendingRef.current = true;
             setQueryPending(true);
             setQueryError("");
-            void approveQuery(host, request.operationId, publicQuery)
+            void approveQuery(
+              host,
+              request.operationId,
+              publicQuery,
+              request.target,
+              request.signal,
+            )
               .then(() => finishQueryRequest(true))
               .catch((err) => {
+                if (queryRequestRef.current !== request) return;
+                if (
+                  !targetIsCurrent(
+                    host,
+                    request.target,
+                    request.target.generation,
+                  )
+                ) {
+                  finishQueryRequest(false);
+                  return;
+                }
                 queryPendingRef.current = false;
                 setQueryPending(false);
                 setQueryError(errorCopy(err, locale));

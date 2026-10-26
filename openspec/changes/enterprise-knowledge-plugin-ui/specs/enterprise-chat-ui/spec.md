@@ -6,6 +6,20 @@
 
 ## ADDED Requirements
 
+### Requirement: Equivalent context stability
+Equivalent Host context snapshots MUST NOT reload session/catalog or overwrite an unsaved selection merely because object identity changes. Real generation, agent or thread changes MUST still reload and isolate stale responses.
+
+#### Scenario: Readiness rerenders while selection is edited
+- **WHEN** Host rerenders with a new context object carrying the same scope values
+- **THEN** session/catalog request counts remain unchanged and the newer unsaved selection remains intact
+
+### Requirement: Captured confirmation focus
+The plugin MUST retain the meaningful focus trigger during synchronous selection capture, before asynchronous preparation can disable it. Closing confirmation SHALL restore a connected trigger in the same current context and MUST NOT reuse a previous capture's stale trigger.
+
+#### Scenario: Send button is disabled during preparation
+- **WHEN** synchronous capture is followed by Host disabling the focused send button and the user cancels the public-query dialog
+- **THEN** cancellation sends no public query, preserves the draft and restores the captured trigger after it becomes available without querying Host-private DOM
+
 ### Requirement: Scoped session selection
 New sessions SHALL initialize from expert defaults restricted by current authorization; empty selections MUST block knowledge queries. Explicitly clearing a selection MUST persist without automatic refill. Switching users, agents or threads MUST load only that context's server state.
 
@@ -108,3 +122,8 @@ The builtin chat shell MUST read authenticated generic requirement readiness wit
 #### Scenario: First send obtains its native thread
 - **WHEN** the composer has no persisted thread yet
 - **THEN** it checks Agent-scope readiness, creates the real native thread, and checks that thread before plugin preparation; no pending identifier is sent as a real thread
+
+#### Scenario: Reply targets the displayed HITL pause
+- **WHEN** the native input responds to an existing ask pause with a server-issued pending ID
+- **THEN** the resume request carries that exact pause ID and original thread, without preparing a new plugin operation or supplying a client plugin_context
+- **AND** a newer pause cannot replace the displayed target through the legacy newest-pause fallback; legacy callers without an ID remain compatible

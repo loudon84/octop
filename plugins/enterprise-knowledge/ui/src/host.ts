@@ -41,9 +41,7 @@ export interface PluginHost {
     surface: "settings" | "composer",
     component: (props: any) => unknown,
   ): () => void;
-  registerComposerPreparation?(
-    handler: ComposerPreparationHandler,
-  ): () => void;
+  registerComposerPreparation?(handler: ComposerPreparationHandler): () => void;
 }
 
 export interface PluginSetupHost extends PluginHost {

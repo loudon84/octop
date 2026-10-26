@@ -58,6 +58,43 @@ function actionResult<T>(result: T) {
 describe("SearchSettings", () => {
   afterEach(() => cleanup());
 
+  it("preserves edited fields when equivalent context objects rerender", async () => {
+    await setupGlobals();
+    let liveContext = { ...context };
+    const host = {
+      getContext: () => liveContext,
+      request: vi.fn(async () => actionResult(adminSettings())),
+    };
+    const { SearchSettings } = await import("./SearchSettings");
+    const view = render(
+      <SearchSettings host={host as never} context={context as never} />,
+    );
+    await screen.findByText("Search sources");
+    const address = screen.getByLabelText("Primary source Base URL");
+    fireEvent.change(address, { target: { value: "https://draft.example" } });
+
+    for (let index = 0; index < 5; index += 1) {
+      view.rerender(
+        <SearchSettings
+          host={host as never}
+          context={{ ...context } as never}
+        />,
+      );
+    }
+
+    expect(host.request).toHaveBeenCalledTimes(1);
+    expect(
+      (screen.getByLabelText("Primary source Base URL") as HTMLInputElement)
+        .value,
+    ).toBe("https://draft.example");
+
+    liveContext = { ...context, generation: "g2" };
+    view.rerender(
+      <SearchSettings host={host as never} context={liveContext as never} />,
+    );
+    await waitFor(() => expect(host.request).toHaveBeenCalledTimes(2));
+  });
+
   it("loads admin search settings and saves with KEEP defaults", async () => {
     await setupGlobals();
     const host = {
@@ -68,9 +105,7 @@ describe("SearchSettings", () => {
         .mockResolvedValueOnce(actionResult(adminSettings(2))),
     };
     const { SearchSettings } = await import("./SearchSettings");
-    render(
-      <SearchSettings host={host as never} context={context as never} />,
-    );
+    render(<SearchSettings host={host as never} context={context as never} />);
 
     await screen.findByText("Search sources");
     expect(host.request).toHaveBeenCalledWith(
@@ -78,7 +113,9 @@ describe("SearchSettings", () => {
       expect.objectContaining({ method: "POST" }),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Save search sources" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save search sources" }),
+    );
     await waitFor(() => expect(host.request).toHaveBeenCalledTimes(2));
     const saveCall = host.request.mock.calls[1];
     const body = JSON.parse(String(saveCall[1].body));
@@ -110,9 +147,7 @@ describe("SearchSettings", () => {
       }),
     };
     const { SearchSettings } = await import("./SearchSettings");
-    render(
-      <SearchSettings host={host as never} context={context as never} />,
-    );
+    render(<SearchSettings host={host as never} context={context as never} />);
     await screen.findByText("Search sources");
 
     const run = screen.getByRole("button", {
@@ -140,7 +175,9 @@ describe("SearchSettings", () => {
     );
 
     // Save bumps revision while diagnosis is in flight.
-    fireEvent.click(screen.getByRole("button", { name: "Save search sources" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save search sources" }),
+    );
     await waitFor(() =>
       expect(
         host.request.mock.calls.some((call) =>
@@ -188,9 +225,7 @@ describe("SearchSettings", () => {
         .mockResolvedValueOnce(actionResult(adminSettings(5))),
     };
     const { SearchSettings } = await import("./SearchSettings");
-    render(
-      <SearchSettings host={host as never} context={context as never} />,
-    );
+    render(<SearchSettings host={host as never} context={context as never} />);
     await screen.findByText(/Credential recovery is blocked/);
     expect(
       (

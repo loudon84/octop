@@ -503,9 +503,7 @@ class SearchSettingsService:
             record = await self._facade.get_record(SEARCH_DIAGNOSTICS, diag_role)
             if record is not None:
                 diagnostics.append(self._diagnostic_view(record.payload, sources_after))
-        settings = self._project(
-            sources_after, blocked=blocked, diagnostics=tuple(diagnostics)
-        )
+        settings = self._project(sources_after, blocked=blocked, diagnostics=tuple(diagnostics))
         return SearchTestOutput(settings=settings, diagnostic=diagnostic)
 
     async def _fresh_admin(self, actor: PluginActor) -> PluginActor:

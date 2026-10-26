@@ -87,6 +87,7 @@ describe("pendingHitl", () => {
     ]);
     expect(ask?.messageId).toBe("ask");
     expect(ask?.questions[0]?.question).toBe("Which DB?");
+    expect(ask?.pendingId).toBe("ab12");
   });
 
   it("finds the latest pending tool approval and skips questions", () => {

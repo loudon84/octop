@@ -85,6 +85,8 @@ session.capabilities为只读派生对象：can_save_selection、can_select_know
 
 阅读cursor固定在首次读取族创建后30分钟过期，续读不会刷新有效期；过期或来源改变时停止追加，提供明确重新开始入口。网络/预算失败不推进位置，重试同一continuation前仍需后端鉴权与摘要检查。服务端无法在共同预算内验证完整块集合时展示失败，不把失败内容追加为成功半页。当前目标部署原文入口未验证，显示原文不可用且不发resource请求；检索文本仍可按权限阅读。
 
+实时工具结果可能先于 operation 终态到达。evidence.list 返回身份、scope、revision 合法但状态仍 VALIDATING/RETRIEVING/GENERATING 时，插件只显示现有本地化加载态，不把部分 evidence 当可信卡片，也不显示通用失败。仅重取本地鉴权 action，采用 250ms 起、最多2秒间隔、30秒自动等待上限；上限后保持明确待完成状态并提供手动刷新。完成态才校验并展示证据；403及DENIED/FAILED/CANCELLED/INTERRUPTED终态、context或工具身份变化、隐藏卸载均停止并清理定时请求；未知状态作为非法响应，不轮询。不得通过放宽服务端 operation 状态或证据权限校验解决 UI 时序问题。
+
 ## Risks / Trade-offs
 
 - 挂载点缺失 → UI实现前完成固定Host契约，不复制企业表单到核心页面。
@@ -137,3 +139,5 @@ reader 同时最多一个 read 在途，并在 await/React提交前同步占位�
 ### Live Tool Host presentation metadata (P09c1)
 
 Existing live locale/theme behavior is refined by the independently reviewed `prd/evidence/enterprise-p1/tool-presentation-context-contract.md`: an internal optional getter supplies only current locale/theme while captured agent/thread/auth/registration/one-use authority remains fixed. A reactive ThemeProvider and current language notify mounted memo renderers through an ordinary presentation prop update; Host/activation/reader/continuation do not reset. Exact Core delta is three source paths and one integration test, frozen separately. This planning acceptance does not complete UI4.1 or actual browser verification.
+
+HITL输入框答复保留findPendingAsk取得的服务端pending_id，并通过通用路由显式映射至现有resume hook的pendingId参数。已展示旧pause不得隐式改答最新pause；不加客户端plugin_context，服务端仍从原continuation恢复并重新授权。无ID的legacy调用保持兼容，过期ID由既有后端拒绝。

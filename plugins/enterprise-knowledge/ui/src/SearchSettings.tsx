@@ -1,6 +1,6 @@
 import * as React from "./host";
 import type { PluginHost, PluginSurfaceContext } from "./host";
-import { classifyTransportError, contextKey } from "./api";
+import { classifyTransportError } from "./api";
 import { t, type MessageKey } from "./i18n";
 import {
   getSearchSettings,
@@ -113,6 +113,7 @@ function buildPart(draft: SourceDraft, role: SearchRole) {
 }
 
 export function SearchSettings({ host, context }: Props) {
+  const { agentId, generation } = context;
   const locale = context.locale;
   const text = (key: MessageKey) => t(locale, key);
   const [loading, setLoading] = React.useState(true);
@@ -133,6 +134,8 @@ export function SearchSettings({ host, context }: Props) {
   const [publicQuery, setPublicQuery] = React.useState("");
   const [confirmQuery, setConfirmQuery] = React.useState(false);
   const loadGen = React.useRef(0);
+  const scopeRef = React.useRef({ agentId, generation });
+  scopeRef.current = { agentId, generation };
   const configRevision = React.useRef(0);
 
   const applySettings = React.useCallback((next: SearchSettingsAdmin) => {
@@ -144,26 +147,28 @@ export function SearchSettings({ host, context }: Props) {
 
   const refresh = React.useCallback(async () => {
     const gen = ++loadGen.current;
-    const key = contextKey(context, "search");
+    const key = `${generation}:${agentId ?? ""}`;
+    const isScopeCurrent = () => {
+      const current = scopeRef.current;
+      return `${current.generation}:${current.agentId ?? ""}` === key;
+    };
     setLoading(true);
     setError("");
     setConflict(false);
     try {
       const next = await getSearchSettings(host);
-      if (gen !== loadGen.current || contextKey(context, "search") !== key)
-        return;
+      if (gen !== loadGen.current || !isScopeCurrent()) return;
       applySettings(next);
       setNotice(t(locale, "loaded"));
     } catch (err) {
-      if (gen !== loadGen.current || contextKey(context, "search") !== key)
-        return;
+      if (gen !== loadGen.current || !isScopeCurrent()) return;
       setError(errorCopy(err, locale));
       setSettings(null);
       setDraft(null);
     } finally {
       if (gen === loadGen.current) setLoading(false);
     }
-  }, [applySettings, context, host, locale]);
+  }, [agentId, applySettings, generation, host, locale]);
 
   React.useEffect(() => {
     void refresh();
@@ -187,10 +192,7 @@ export function SearchSettings({ host, context }: Props) {
       setError(text("invalidFields"));
       return;
     }
-    if (
-      draft.primary.ca_op === "REPLACE" &&
-      !draft.primary.ca_bundle.trim()
-    ) {
+    if (draft.primary.ca_op === "REPLACE" && !draft.primary.ca_bundle.trim()) {
       setError(text("invalidFields"));
       return;
     }
@@ -234,7 +236,8 @@ export function SearchSettings({ host, context }: Props) {
   };
 
   const onTest = async () => {
-    if (!draft || testing || recovering || !confirmQuery || !publicQuery) return;
+    if (!draft || testing || recovering || !confirmQuery || !publicQuery)
+      return;
     setTesting(true);
     setError("");
     const expected = draft.revision;
@@ -310,8 +313,7 @@ export function SearchSettings({ host, context }: Props) {
     },
   ) => {
     const source = draft[role];
-    const searchRole: SearchRole =
-      role === "primary" ? "PRIMARY" : "SECONDARY";
+    const searchRole: SearchRole = role === "primary" ? "PRIMARY" : "SECONDARY";
     return (
       <fieldset disabled={formLocked}>
         <legend>
@@ -431,11 +433,7 @@ export function SearchSettings({ host, context }: Props) {
         {(() => {
           const diag = diagFor(searchRole);
           if (!diag) return null;
-          const when = formatDiagTime(
-            diag.tested_at,
-            locale,
-            context.timeZone,
-          );
+          const when = formatDiagTime(diag.tested_at, locale, context.timeZone);
           return (
             <p role="status">
               {text("searchDiagnostic")}: {diag.status}
@@ -492,7 +490,9 @@ export function SearchSettings({ host, context }: Props) {
           </button>
         </div>
       )}
-      <form onSubmit={(event: { preventDefault(): void }) => void onSave(event)}>
+      <form
+        onSubmit={(event: { preventDefault(): void }) => void onSave(event)}
+      >
         {renderSource("primary", "searchPrimary", "SEARXNG", {
           ca: settings.primary.ca_bundle_configured,
           credential: false,

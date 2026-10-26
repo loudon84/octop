@@ -6,6 +6,10 @@ Navigation guide for AI coding agents working in this repository.
 
 > Favor caution over speed; trivial tasks may relax these rules. These principles complement [§10 Change workflow](#10-change-workflow) and [§11 Communication](#11-communication).
 
+### Local development directory
+
+On this machine, use `E:\git\octop` as the single development checkout. Continue on its current feature branch; create another worktree only when the user explicitly requests one. When recovering an old session or relocating this checkout, read [the directory migration record](prd/Octop_开发目录迁移记录_2026-10-26.md) before using historical paths.
+
 ### Think before writing
 
 - State assumptions up front; ask when unsure — do not guess.

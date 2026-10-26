@@ -1,8 +1,10 @@
 # Octop 下一阶段开发计划与实施明细 v1.0
 
+> 2026-10-26 当前执行更新：本地 UI 真实安装与主要浏览器链路已验，独立review和最终 `make all` 已通过；详见 [真实安装验收记录](E:/git/octop/prd/evidence/enterprise-p1/ui-installed-acceptance.md) 与 [本轮执行计划](E:/git/octop/prd/Octop_UI真实安装验收_功能实现与执行计划_v1.0.md)。远程供应商、私库自动开通及生产交付继续保留独立待办；本文早期待验描述按上述最新证据理解。
+
 日期：2026-10-26。基线：`codex/enterprise-p1` / `6dcdb8961b233e1bf91f9219882b66179dedb247`。
 
-状态：**规划稿，供后续执行；未启动本计划功能编码。** 本文细化已有第一阶段需求，不宣布发布、不提前勾选 OpenSpec。实施结果以原 OpenSpec tasks 与执行证据记录为准。
+状态：**历史实施计划。** N00–N08 的本地代码与自动化报告已随 `10fe84d2` 提交；真实安装/Windows 浏览器及远端验收仍待完成。2026-10-26 开发目录统一为 `E:\git\octop`。下文基线描述和批次要求保留规划时点含义，当前结果以 execution-status、next-stage-acceptance 和原 OpenSpec tasks 为准。
 
 ## 1. 阶段目标与取舍
 
@@ -36,14 +38,14 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 唯一功能开发目录 | `C:\Users\Administrator\.codex\worktrees\enterprise-p1\octop` |
-| 主仓导航目录 | `E:\git\octop`，当前 main；不能在此重做功能或清理未跟踪目录 |
+| 唯一功能开发目录 | `E:\git\octop` |
+| 主仓目录角色 | `E:\git\octop` 为唯一开发 checkout，当前分支 `codex/enterprise-p1`；旧隔离 worktree 退出使用 |
 | 整项计数 | 主计划 15/29；插件 UI 5/13；私库 6/18。三组有包含关系，不能合并计算总完成率 |
 | 搜索现码 | `search_http.py`、`search_settings.py`、`search_settings_actions.py` 已存在；`search.get/save/test/recover` 已注册 |
 | 最近定向验证 | 基线搜索两文件测试已实际复跑：136 passed，exit 0 |
 | 全量记录边界 | 5674 passed / 236 skipped 的 make all 属于旧基线 `74dc70d8`；不能套用到新 HEAD |
-| 聊天实际限制 | SessionService / OperationService 当前限制 KB_ONLY；DTO 声明三模式不代表执行链支持三模式 |
-| UI 实际入口 | `ui/src/index.ts` 目前注册 settings 和 evidence renderer，尚无业务 composer 注册 |
+| 原规划时聊天限制 | `6dcdb896` 时仅 KB_ONLY；`10fe84d2` 已新增三模式，当前验收边界见 next-stage-acceptance |
+| UI 入口 | `10fe84d2` 已注册 settings、composer 和 evidence renderer；真实安装/浏览器链路仍待验 |
 
 按顺序读取：
 
@@ -316,10 +318,10 @@ make 'SHELL=D:/Git/bin/bash.exe' build-frontend
 | 私库 3.x～5.x | 只保持兼容，不计功能完成 | 后续 R6/R7：生产者→来源合同→联合检索→私库页面 |
 | 主 6.2/6.3/7.x | N08 贡献质量与安装证据 | legacy/T0/回退、正式包、PG、远端、20题及发布 Gate |
 
-推荐开工顺序：**N00 → N01 → N02a**。第一个交付点是可操作的搜索设置页面，不等待完整主备编排或私库远端对接。
+原计划开工顺序为 **N00 → N01 → N02a**。该阶段已有 `10fe84d2` 本地实现；接手先核对 next-stage-acceptance 的安装/浏览器/人工待验项，不因本文保留实施明细而重复开发。
 
 ## 9. 本次规划审查记录
 
-已完成一次独立只读 builder 审查，并对照源码补入四项前提：CA 保留/替换/清除、员工 search.get 最小字段投影、WEB 证据后端前移、deadline 与 drain 所有权。它们分别纳入 N01/N02a-1、N05b-1、N04a/N04c，**尚未修改功能代码**。
+已完成一次独立只读 builder 审查，并对照源码补入四项前提：CA 保留/替换/清除、员工 search.get 最小字段投影、WEB 证据后端前移、deadline 与 drain 所有权。它们分别纳入 N01/N02a-1、N05b-1、N04a/N04c，**该句为规划时点记录；后续代码已纳入 `10fe84d2`，验证范围见 next-stage-acceptance**。
 
 后续合同冻结和真实测试仍按各批执行。本次文档核对不能替代这些批次的功能/安全验收，也不改变原任务完成数。

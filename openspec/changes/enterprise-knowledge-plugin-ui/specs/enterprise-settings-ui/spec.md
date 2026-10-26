@@ -6,6 +6,13 @@
 
 ## ADDED Requirements
 
+### Requirement: Equivalent context preserves settings drafts
+Settings bootstrap MUST depend on semantic scope rather than the identity of a Host snapshot object. Equivalent snapshots and theme/timezone/readiness rerenders MUST NOT refetch settings or reset edited fields; a real generation or agent change MUST still reload and reject stale results.
+
+#### Scenario: Host rerenders during search configuration editing
+- **WHEN** a user edits a search source and Host supplies an equivalent new context object
+- **THEN** the draft is preserved and no duplicate search.get request is sent
+
 ### Requirement: Fixed plugin-owned settings entry
 Enterprise forms SHALL render inside fixed settings surfaces on existing connector/expert pages. Business components MUST be loaded from the plugin; the host MUST NOT add arbitrary plugin pages or navigation. UI capabilities MUST come from authenticated server responses.
 

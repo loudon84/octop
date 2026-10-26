@@ -5,7 +5,11 @@ const { request, requestUpload } = vi.hoisted(() => ({
   requestUpload: vi.fn(),
 }));
 
-vi.mock("../request", () => ({ request, requestUpload }));
+vi.mock("../request", async () => ({
+  ...(await vi.importActual<typeof import("../request")>("../request")),
+  request,
+  requestUpload,
+}));
 
 import { knowledgeBasesApi } from "./knowledgeBases";
 
@@ -22,7 +26,9 @@ describe("knowledgeBasesApi", () => {
     knowledgeBasesApi.getOnnxDownloadStatus();
     knowledgeBasesApi.activateOnnx("BAAI/bge-small-zh-v1.5");
 
-    expect(request).toHaveBeenNthCalledWith(1, "/knowledge-bases/capability");
+    expect(request).toHaveBeenNthCalledWith(1, "/knowledge-bases/capability", {
+      headers: undefined,
+    });
     expect(request).toHaveBeenNthCalledWith(2, "/knowledge-bases/feature", {
       method: "PUT",
       body: JSON.stringify({ enabled: true, model: "BAAI/bge-small" }),
@@ -47,6 +53,18 @@ describe("knowledgeBasesApi", () => {
         body: JSON.stringify({ model: "BAAI/bge-small-zh-v1.5" }),
       },
     );
+  });
+
+  it("includes the bridge agent header only when an agent is supplied", () => {
+    knowledgeBasesApi.getCapability();
+    knowledgeBasesApi.getCapability("agent-1");
+
+    expect(request).toHaveBeenNthCalledWith(1, "/knowledge-bases/capability", {
+      headers: undefined,
+    });
+    expect(request).toHaveBeenNthCalledWith(2, "/knowledge-bases/capability", {
+      headers: { "X-Octop-Agent-Id": "agent-1" },
+    });
   });
 
   it("requests the full ONNX catalog when expanding embedding options", () => {

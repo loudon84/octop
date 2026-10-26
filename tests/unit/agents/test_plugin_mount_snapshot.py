@@ -57,6 +57,7 @@ def _compiled_agent_entry(
     config = replace(
         config,
         workspace_dir=workspace,
+        backend={"type": "local_shell", "root_dir": str(workspace.resolve()), "virtual_mode": True},
         providers=providers,
         default_model="test-provider/test-model",
         memory=(),

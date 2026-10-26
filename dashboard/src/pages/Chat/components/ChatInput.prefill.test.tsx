@@ -233,6 +233,7 @@ describe("ChatInput prefill clear-on-send", () => {
       messageId: "message-ask",
       actions: [{ name: "ask_user_question", args: { questions: [] } }],
       questions: [],
+      pendingId: "pending-ask",
     };
 
     function PendingAskInput() {
@@ -290,6 +291,7 @@ describe("ChatInput prefill clear-on-send", () => {
     expect(resumeHitl).toHaveBeenCalledExactlyOnceWith(
       [{ type: "respond", message: "answer the question" }],
       targetThread,
+      "pending-ask",
     );
     expect(captureComposerPreparations).not.toHaveBeenCalled();
     expect(prepareComposerContext).not.toHaveBeenCalled();

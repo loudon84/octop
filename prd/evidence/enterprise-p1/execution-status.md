@@ -1,5 +1,13 @@
 # 执行状态与本地验证
 
+## 2026-10-26 开发目录统一
+
+用户要求后，开发 checkout 已迁至 `E:\git\octop`，当前 `codex/enterprise-p1` / `10fe84d2`。下方“功能尚未 commit”是提交前验收记录，代码现已提交。旧目录的审查记录、构建结果和日志已保留，详情见 `prd/Octop_开发目录迁移记录_2026-10-26.md`；当前工作目录以 AGENTS.md 为准。
+
+迁移后实际验证：Python 从 E 盘源码导入、uv frozen sync 通过；四文件搜索 **157 passed**；插件 UI **134 passed**、typecheck/build 通过。本次未重复运行全仓、未新增功能开发/提交/推送。
+
+---
+
 ## 2026-10-26 Next-stage N00–N08（本地 M1/M2/M3）
 
 执行者：Cursor Composer（非 GPT-6 Luna）。起点 HEAD `6dcdb896`；功能改动尚未 commit。
@@ -160,3 +168,15 @@ WeKnora知识库远端验证转人工，清单见weknora-manual-handoff.md；相
 P10a 作者在暂停时已提交冻结报告：两新路径，定向测试 125 passed、限定 Ruff/format/strict mypy 通过（作者报告证据，主代理已完整阅读）；尚未独立 Spec/Quality 审查，未接受、未勾上游任务。实现代理已中断并收到停止通知。P10b1 仅草案，I03b1 仅规划，P09c2 未实施，均不继续推进。
 
 主计划 15/29、插件 UI 5/13、私库增量 6/18 保持。最终 make all、真实浏览器完整链路和远端验收未通过。本次仅保存暂停状态，没有新增代码修改、测试、构建、提交或推送；现有本地开发服务保持现场。
+
+## 2026-10-26 本地 UI 安装验收收尾
+
+按用户要求先形成 `prd/Octop_UI真实安装验收_功能实现与执行计划_v1.0.md`，再由 GPT-6 Luna 实施、独立review。现有 UI 本地真实安装/正常登录/三模式/证据侧栏/续读/原文明确不可用/撤权/插件停用恢复已验证；最终正常 ZIP 上传安装200，manifest/main/bundle与源一致。详情及截图、脱敏请求见 `ui-installed-acceptance.md` 和 `ui-installed-acceptance-summary.json`。
+
+最终 `make all` exit0：5728 passed、236 skipped、94warnings；插件UI162、Dashboard1566项测试通过，typecheck/build及规定静态门槛通过。独立审计允许UI七项完整勾选，CLI已确认为12/13；3.4仍有企业Composer贯通忙时独立operation/HITL原上下文的组合证据缺口，当前新增B03f精准集成测试计划，不能写作代码缺失。主计划15/29、私库6/18保持，远程供应商/私库/生产验收不因本地通过而勾选。本轮未commit/push/发布；临时浏览器和5190已关闭。
+
+## 2026-10-26 本轮最终闭合
+
+B03f真实Composer→Host→原生发送/队列/HITL精准集成及B03g通用pending_id透传已完成，独立Spec/Quality复审PASS；HTTP替身revision契约R1也已修复。B04e用静态预载真实useSessions移除本轮15秒测试上限，保留全部原断言。
+
+最终Dashboard `npm test -- --maxWorkers=4` exit0：284文件/1568项通过，299.30秒；tsc/lint/build通过（lint0 errors/67既有warnings），插件UI162项通过。后端/运行器最终make all 5728 passed/236 skipped，后续仅前端/测试修改按对应门槛验证。OpenSpec CLI确认UI **13/13 complete**、strict validate0，主15/29、私库6/18保持。本轮全部功能/测试代码由GPT-6 Luna实施，未commit/push/归档/发布。人工验证重点见已更新WeKnora清单；私库生产者等仍属未实现工作，不能只交给配置人员。所有分段证据和临时实例关闭说明见ui-installed-acceptance.md。

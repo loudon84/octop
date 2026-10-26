@@ -2,7 +2,6 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
-import { useEffect } from "react";
 import AuthGuard from "./AuthGuard";
 
 vi.mock("../api/modules/auth", () => ({
@@ -71,31 +70,36 @@ describe("AuthGuard offline boot", () => {
 
     function NavProbe() {
       const navigate = useNavigate();
-      useEffect(() => {
-        navigate("/b");
-      }, [navigate]);
-      return <div>protected-shell</div>;
+      return (
+        <button type="button" onClick={() => navigate("/b")}>
+          navigate-to-b
+        </button>
+      );
     }
 
     render(
       <MemoryRouter initialEntries={["/a"]}>
         <AuthGuard>
-          <Routes>
-            <Route path="/a" element={<NavProbe />} />
-            <Route path="/b" element={<div>protected-shell</div>} />
-          </Routes>
+          <div data-testid="protected-shell">
+            <Routes>
+              <Route path="/a" element={<NavProbe />} />
+              <Route path="/b" element={<div data-testid="route-b" />} />
+            </Routes>
+          </div>
         </AuthGuard>
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("protected-shell")).toBeInTheDocument();
+    expect(await screen.findByTestId("protected-shell")).toBeInTheDocument();
     await waitFor(() => {
       expect(authApi.getAuthStatus).toHaveBeenCalledTimes(1);
+      expect(authApi.me).toHaveBeenCalledTimes(1);
     });
-    // Give route-driven navigate identity churn a tick; gate must not re-run.
-    await waitFor(() => {
-      expect(screen.getByText("protected-shell")).toBeInTheDocument();
-    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "navigate-to-b" }),
+    );
+    expect(await screen.findByTestId("route-b")).toBeInTheDocument();
+    expect(screen.getByTestId("protected-shell")).toBeInTheDocument();
     expect(authApi.getAuthStatus).toHaveBeenCalledTimes(1);
     expect(authApi.me).toHaveBeenCalledTimes(1);
   });

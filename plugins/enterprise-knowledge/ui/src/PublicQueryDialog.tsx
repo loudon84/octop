@@ -34,7 +34,7 @@ export function PublicQueryDialog({
       if (event.key !== "Tab") return;
       const focusable = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), textarea:not([disabled])',
+          "button:not([disabled]), textarea:not([disabled])",
         ) ?? [],
       );
       if (focusable.length === 0) return;

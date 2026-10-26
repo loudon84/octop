@@ -1,8 +1,10 @@
 # Octop 第一阶段交接与后续开发规划（Cursor Handoff）
 
-> 2026-10-26 后续更新：本文主体保留 `74dc70d8` 时点的历史交接。当前已新增提交 `6dcdb896`，完成搜索设置后端及 pre_send；“未实现 search settings”“P10b1 NOT READY”等旧描述不代表现状。下一阶段以 [Octop_下一阶段开发计划与实施明细_v1.0.md](./Octop_下一阶段开发计划与实施明细_v1.0.md) 和 execution-status 最新段为准。本次更新只编写规划，未启动后续功能编码。
+> 2026-10-26 最新验收：已写知识/搜索 UI 的本地真实安装、正常登录、三模式、证据侧栏/续读、撤权及插件停用恢复已验；最终 `make all` 为5728 passed，插件UI162项、Dashboard1568项通过，代码独立review通过。详细范围及截图见 [真实安装验收记录](E:/git/octop/prd/evidence/enterprise-p1/ui-installed-acceptance.md)。远程供应商和私库自动开通仍未完成；下文的“真实安装/最终make all待完成”为历史状态，当前先读最新验收记录。
 
-更新日期：2026-10-26。代码基线：`74dc70d81753488cce48dc2e107e19f46dc5a741`，分支 `codex/enterprise-p1`。
+> 2026-10-26 目录统一：唯一开发目录现为 `E:\git\octop`，分支 `codex/enterprise-p1`，功能代码 HEAD `10fe84d2`。该提交已包含搜索设置、composer、受控联网和三模式本地实现；真实安装/浏览器及远端验收仍待完成。下文保留早期交接背景，当前状态先读 execution-status 最新段和 [开发目录迁移记录](./Octop_开发目录迁移记录_2026-10-26.md)。
+
+更新日期：2026-10-26。历史交接基线：`74dc70d8`；当前功能代码基线：`10fe84d203f5a6983719e83a0667553e3511ab38`，分支 `codex/enterprise-p1`。
 
 本文用于接手已有实现、识别剩余工作和安排下一批开发。需求与完整验收场景仍以已评审 OpenSpec 和实施计划为准；本文不另建任务事实源，也不宣布第一阶段交付完成。
 
@@ -10,25 +12,25 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| 实际开发 worktree | `C:\Users\Administrator\.codex\worktrees\enterprise-p1\octop` |
-| 开发分支及提交 | `codex/enterprise-p1`；`74dc70d8`，本机已提交，尚未推送 |
-| 提交内容 | 企业插件、通用 Host、UI 桥接、私库基础、规格与测试等累计实现；297 个文件 |
-| 主仓目录 | `E:\git\octop` 当前位于 `main`，另有未跟踪的 `.agents/`、`openspec/`、`prd/`；不要直接覆盖、清理或在这里重做功能 |
-| 当前工作状态 | 功能阶段按用户指示暂停；提交阻塞已修复；本次只创建交接文档 |
-| 文档位置 | 开发 worktree 的 `prd/` 为后续维护位置；主仓 `prd/` 同名副本供导航，本次内容一致 |
+| 唯一开发目录 | `E:\git\octop` |
+| 开发分支及提交 | `codex/enterprise-p1`；`10fe84d2`；目录迁移未新增功能提交 |
+| 提交内容 | 已含企业插件、Host、共享知识基础及下一阶段搜索设置、composer、受控联网代码 |
+| 主仓目录 | `E:\git\octop` 已切换到开发分支；原未跟踪文档已独立备份，不再维护双目录副本 |
+| 当前工作状态 | 本轮UI本地验收及修复已完成，尚未提交；见ui-installed-acceptance.md |
+| 文档位置 | 统一维护 `E:\git\octop\prd` |
 
-Cursor 优先直接打开上述开发 worktree。其 Git 元数据依赖主仓，保留 `E:\git\octop`。如以后需要迁回主仓或换机器，先核对分支、未跟踪文件和提交传递方式，不假定远端已经有此提交。
+Cursor 和 Codex 均直接打开 `E:\git\octop`。本机开发目录约定已写入 AGENTS.md；旧 worktree 的恢复、备份和目录迁移证据见迁移记录。
 
 接手先执行只读检查：
 
 ```powershell
-Set-Location 'C:\Users\Administrator\.codex\worktrees\enterprise-p1\octop'
+Set-Location 'E:\git\octop'
 git branch --show-current
 git rev-parse HEAD
 git status --short
 ```
 
-代码提交完成时工作区干净。本交接文档是在该提交之后新建，尚未提交；看到它未跟踪属于预期。本文链接指向本机开发 worktree；换机器后按链接标签中的仓库相对路径定位。
+本交接文档及阶段计划已随 `10fe84d2` 纳入 Git；本次目录说明是后续未提交修改。本文文件链接已改为 E 盘目录；换机器后按链接标签中的仓库相对路径定位。
 
 ## 2. 先读哪些材料
 
@@ -36,14 +38,14 @@ git status --short
 
 | 顺序 | 入口 | 用途 |
 |---|---|---|
-| 1 | [AGENTS.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/AGENTS.md) | 模块依赖、持久化、i18n、服务器时区、Windows、提交门槛 |
-| 2 | [prd/evidence/enterprise-p1/execution-status.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/evidence/enterprise-p1/execution-status.md) | 最新验证与各已接受子批；先读 2026-10-26 最新段 |
-| 3 | [prd/Octop_第一阶段二开实施计划_v1.0.plan.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/Octop_第一阶段二开实施计划_v1.0.plan.md) | PLG-01～11、P01～P15、代码归属与验收映射 |
-| 4 | [openspec/changes/enterprise-knowledge-p1/tasks.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/openspec/changes/enterprise-knowledge-p1/tasks.md) | 主阶段任务；同目录 proposal/specs/design 给出行为要求 |
-| 5 | [openspec/changes/enterprise-knowledge-plugin-ui/tasks.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/openspec/changes/enterprise-knowledge-plugin-ui/tasks.md) | 页面行为与尚未完成的组件/实机任务 |
-| 6 | [openspec/changes/enterprise-user-private-knowledge/tasks.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/openspec/changes/enterprise-user-private-knowledge/tasks.md) | 用户邮箱、独立私库、共享来源增量 |
-| 7 | [prd/evidence/enterprise-p1/core-delta.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/evidence/enterprise-p1/core-delta.md)、[plugin-host-v1.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/evidence/enterprise-p1/plugin-host-v1.md)、[runtime-boundary.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/evidence/enterprise-p1/runtime-boundary.md) | 核心白名单、Host 接口、真实执行边界 |
-| 8 | [prd/Octop_产品定义与第一阶段二开实施计划_v1.0.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/Octop_产品定义与第一阶段二开实施计划_v1.0.md) | 产品需求、A-01～A-07、质量集、发布门禁 |
+| 1 | [AGENTS.md](E:/git/octop/AGENTS.md) | 模块依赖、持久化、i18n、服务器时区、Windows、提交门槛 |
+| 2 | [prd/evidence/enterprise-p1/execution-status.md](E:/git/octop/prd/evidence/enterprise-p1/execution-status.md) | 最新验证与各已接受子批；先读 2026-10-26 最新段 |
+| 3 | [prd/Octop_第一阶段二开实施计划_v1.0.plan.md](E:/git/octop/prd/Octop_第一阶段二开实施计划_v1.0.plan.md) | PLG-01～11、P01～P15、代码归属与验收映射 |
+| 4 | [openspec/changes/enterprise-knowledge-p1/tasks.md](E:/git/octop/openspec/changes/enterprise-knowledge-p1/tasks.md) | 主阶段任务；同目录 proposal/specs/design 给出行为要求 |
+| 5 | [openspec/changes/enterprise-knowledge-plugin-ui/tasks.md](E:/git/octop/openspec/changes/enterprise-knowledge-plugin-ui/tasks.md) | 页面行为与尚未完成的组件/实机任务 |
+| 6 | [openspec/changes/enterprise-user-private-knowledge/tasks.md](E:/git/octop/openspec/changes/enterprise-user-private-knowledge/tasks.md) | 用户邮箱、独立私库、共享来源增量 |
+| 7 | [prd/evidence/enterprise-p1/core-delta.md](E:/git/octop/prd/evidence/enterprise-p1/core-delta.md)、[plugin-host-v1.md](E:/git/octop/prd/evidence/enterprise-p1/plugin-host-v1.md)、[runtime-boundary.md](E:/git/octop/prd/evidence/enterprise-p1/runtime-boundary.md) | 核心白名单、Host 接口、真实执行边界 |
+| 8 | [prd/Octop_产品定义与第一阶段二开实施计划_v1.0.md](E:/git/octop/prd/Octop_产品定义与第一阶段二开实施计划_v1.0.md) | 产品需求、A-01～A-07、质量集、发布门禁 |
 
 原计划中“当前 main”“产品代码尚未实施”“最终全仓待跑”等文字有历史背景；当前实现和最近验证以本文基线及 execution-status 最新段为准。产品规则则继续按已审规格执行，不用状态描述替代需求。
 
@@ -60,21 +62,21 @@ git status --short
 7. 搜索固定为企业 SearXNG 主源、Firecrawl 备用源；部署地址、版本、认证等由操作者配置。
 8. WeKnora 无法完成的远端验证转人工；这不删除私库需求，也不把未实现代码视为已交付。恢复开发时，优先推进可本地验证的搜索、模式及 UI。
 9. 用户偏好功能/测试代码由 GPT-6 Luna 子代理实现，控制器负责契约、任务拆解和独立审查。Cursor 若不具备相同模型/子代理能力，应如实说明能力差异，不伪造调用记录。
-10. 当前暂停没有因创建本文而自动解除。后续按用户在 Cursor 中给出的启动和范围指令执行；提交、推送、发布分别遵循用户授权。
+10. 早期暂停与下一阶段实现均按历史记录保留；当前只在 E 盘目录按用户最新范围工作，提交、推送、发布分别遵循用户授权。
 
 ## 4. 完成进度：区分子批接受与产品交付
 
-计数于本交接生成时重新核对 OpenSpec 复选框：
+计数于本轮UI验收完成后经OpenSpec CLI核对：
 
 | 范围 | 已勾选 / 总数 | 含义 |
 |---|---:|---|
-| 主计划 `enterprise-knowledge-p1` | **15 / 29** | 通用基础与共享知识主链已有实现；搜索、模式、生命周期收尾、迁移和交付门禁未完成 |
-| 插件 UI `enterprise-knowledge-plugin-ui` | **5 / 13** | 通用页面桥接、设置包和共享设置已完成；业务 composer、搜索设置、完整证据流程及实机验收仍有缺口 |
+| 主计划 `enterprise-knowledge-p1` | **15 / 29** | 本轮未重新审计主计划其余大项；远程、迁移、生产交付门禁仍保留待办 |
+| 插件 UI `enterprise-knowledge-plugin-ui` | **13 / 13** | 本地安装/浏览器/组合集成及质量门槛已验；上游HTTP/最终模型合成，不能代替真实供应商对接 |
 | 私库增量 `enterprise-user-private-knowledge` | **6 / 18** | 邮箱、可信身份、后台工作框架、保留记录及当前权限复核完成；实际开通生产者、联合来源与页面未交付 |
 
 这些是大任务计数，多个已接受子批可能仍不足以勾选一个大任务。不能由“全仓测试通过”直接推导所有产品任务完成；例如主任务 7.3 还要求插件 Python/UI 的完整联合质量门槛。
 
-### 4.1 已有实现，可复用
+### 4.1 早期子批记录（后续搜索/UI结果以最新验收记录为准）
 
 | 领域 / 子批 | 已有能力 | 接手时保留的限制 |
 |---|---|---|
@@ -90,10 +92,10 @@ git status --short
 | 私库 I03a | 严格 DTO、开通配置动作、状态/重试动作及记录前提 | 私库 tasks 3.1 仍未完整交付，不能视作用户/KB 已自动创建 |
 | P10a 单源搜索 adapter | `search_http.py` 与 MockTransport 测试已提交；作者定向 125 项通过，当前全仓也通过 | **尚缺独立功能 Spec/Quality 验收**；没有 search actions、全操作去重/主备编排或员工联网就绪 |
 
-### 4.2 尚停在规划或验收阶段
+### 4.2 早期规划/验收记录（搜索/UI已由后续批次推进）
 
 - **P10b1 搜索设置服务：NOT READY 草案。** `search.get/save/test` 的管理员诊断语义、物理发送前权限复核和残留凭据恢复尚需冻结，不能直接照候选 DTO 编码。
-- **I03b1 私库远端 wire：合同规划已审，代码未实施。** 按用户此前优先级后移；精确合同见 [provisioning-wire-contract.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/evidence/enterprise-p1/provisioning-wire-contract.md)。
+- **I03b1 私库远端 wire：合同规划已审，代码未实施。** 按用户此前优先级后移；精确合同见 [provisioning-wire-contract.md](E:/git/octop/prd/evidence/enterprise-p1/provisioning-wire-contract.md)。
 - **P09c2 知识浏览器 fixture：草案未就绪，未启动实现。** 不把计划、MockTransport 或组件渲染当作真实部署联调完成。
 - `search.py`、`search_settings.py`、`provisioning_wire.py` 等可能出现在规划中；实现前检查文件是否已存在，不将拟建路径当成现有接口。
 
@@ -101,13 +103,13 @@ git status --short
 
 | 职责 | 当前主要位置 |
 |---|---|
-| Host 协议、身份、记录/凭据与执行 | `src/octop/infra/agents/plugins/{host_contracts,host,execution}.py`；[docs/plugin-host.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/docs/plugin-host.md) |
+| Host 协议、身份、记录/凭据与执行 | `src/octop/infra/agents/plugins/{host_contracts,host,execution}.py`；[docs/plugin-host.md](E:/git/octop/docs/plugin-host.md) |
 | 仓储、依赖注入和迁移 | `src/octop/infra/db/repos/plugin_*.py`、`src/octop/infra/db/services.py`、`022_plugin_host_storage.sql/.pg.sql` |
 | HTTP 薄适配 | `src/octop/api/routers/plugin_actions.py`；聊天 models/turn；`src/octop/infra/bridge/peer_turn.py` 的字段映射 |
-| 知识插件 | [plugins/enterprise-knowledge/main.py](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/plugins/enterprise-knowledge/main.py)、`enterprise_knowledge/` 内 connections/policy/weknora/probes/service/tools/reading/evidence/sessions/operations |
+| 知识插件 | [plugins/enterprise-knowledge/main.py](E:/git/octop/plugins/enterprise-knowledge/main.py)、`enterprise_knowledge/` 内 connections/policy/weknora/probes/service/tools/reading/evidence/sessions/operations |
 | 私库基础 | 同包 provisioning_models/provisioning_records/provisioning/provisioning_state/provisioning_actions |
-| 搜索现有 adapter | [plugins/enterprise-knowledge/enterprise_knowledge/search_http.py](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/plugins/enterprise-knowledge/enterprise_knowledge/search_http.py) |
-| 策略 hook | [plugins/enterprise-policy/main.py](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/plugins/enterprise-policy/main.py)、`enterprise_policy/policy.py` |
+| 搜索现有 adapter | [plugins/enterprise-knowledge/enterprise_knowledge/search_http.py](E:/git/octop/plugins/enterprise-knowledge/enterprise_knowledge/search_http.py) |
+| 策略 hook | [plugins/enterprise-policy/main.py](E:/git/octop/plugins/enterprise-policy/main.py)、`enterprise_policy/policy.py` |
 | 插件 UI | `plugins/enterprise-knowledge/ui/src/{index,api,host,i18n,Settings,EvidenceRenderer}.*`；包入口 `ui/dist/index.js` |
 | Dashboard 通用桥接 | `dashboard/src/plugins/toolRenderers/`、`pages/Chat/ChatToolDockContext.tsx`、ChatInput/MessageBubble/chatStore/useChatSend 等 |
 | 测试 | `tests/unit/enterprise/`、`tests/unit/plugins/`、`tests/integration/test_enterprise_plugin_*.py`；插件 UI 自身测试在插件包中 |
@@ -136,7 +138,7 @@ git status --short
 | 批次 | 开发需求 / 对应任务 | 前置与完成门槛 |
 |---|---|---|
 | R0 基线接管 | 核对提交、差异、OpenSpec 和本文；形成下一薄片 brief | 不重做已接受 Host/reader/locale-theme；先核对当前代码，避免复用过期草稿 |
-| R1 P10a 验收 | 独立审查现有 SearXNG/Firecrawl adapter；主任务 5.1 的本地部分 | 对照 [search-http-adapters-contract.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/evidence/enterprise-p1/search-http-adapters-contract.md)，关闭真实问题后再给后续调用；真实供应商验证单列 |
+| R1 P10a 验收 | 独立审查现有 SearXNG/Firecrawl adapter；主任务 5.1 的本地部分 | 对照 [search-http-adapters-contract.md](E:/git/octop/prd/evidence/enterprise-p1/search-http-adapters-contract.md)，关闭真实问题后再给后续调用；真实供应商验证单列 |
 | R2 搜索配置后端 | 冻结诊断规格，分片实现 `search.get/save/test`、revision/凭据与诊断；主 5.3 | 先收敛下节四项决策；真实 Host/SQLite + MockTransport，管理员限制、KEEP/REPLACE/CLEAR、迟到结果/CAS、安全错误均可证明 |
 | R3 受控搜索编排 | operation 持久去重/领取、主备错误矩阵、10/22 秒和最多两次、WEB evidence；主 5.2 | 不依赖模型控制重试；同 operation 并发/重复调用不重新外发；取消、权限变更和迟到结果有明确终态 |
 | R4 搜索设置 UI | 插件设置中配置、分别诊断两源、revision 与就绪提示；UI 2.4 | 后端 action DTO 已冻结；一源不能联网，诊断不授予员工搜索许可；独立 ESM/typecheck/test/build |
@@ -160,7 +162,7 @@ R6/R7 的远端验证已转人工，可以在明确合同下做本地 mock 开�
 
 ## 8. 人工配置与远端验收交接
 
-详见 [prd/evidence/enterprise-p1/weknora-manual-handoff.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/evidence/enterprise-p1/weknora-manual-handoff.md)、[prd/config/enterprise-dev.env.example](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/config/enterprise-dev.env.example) 和 [prd/config/README.md](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/prd/config/README.md)。本文不复制真实地址、API Key、管理员 JWT、密码或登录 session。
+详见 [prd/evidence/enterprise-p1/weknora-manual-handoff.md](E:/git/octop/prd/evidence/enterprise-p1/weknora-manual-handoff.md)、[prd/config/enterprise-dev.env.example](E:/git/octop/prd/config/enterprise-dev.env.example) 和 [prd/config/README.md](E:/git/octop/prd/config/README.md)。本文不复制真实地址、API Key、管理员 JWT、密码或登录 session。
 
 - WeKnora 版本目前是用户报告的 **0.8.3**，真实 digest/commit 未核验。既往只读证据仅 4 GET、可达但列表 0 库；没有非空搜索/阅读、实际用户/KB/Key 开通和两身份隔离证据。
 - 人工需补 digest/CA、两组有索引资料的库/文档及身份、Owner 与最小 scoped Key、非空 API 响应、权限负例、连续阅读和质量集结果。
@@ -239,7 +241,7 @@ npm --prefix plugins/enterprise-knowledge/ui run build
 
 ## 12. 推荐技能与接手提示词
 
-推荐使用项目已有的 `openspec-apply-change`、`openspec-update-change`、`openspec-explore`；真正完成后再用 archive/sync。项目入口见 [`.agents/skills`](C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop/.agents/skills)。优先调用 Cursor 当前实际可用的技能；不能假设 Codex 全局技能、工具 ID 和代理会话也在 Cursor 中存在。
+推荐使用项目已有的 `openspec-apply-change`、`openspec-update-change`、`openspec-explore`；真正完成后再用 archive/sync。项目入口见 [`.agents/skills`](E:/git/octop/.agents/skills)。优先调用 Cursor 当前实际可用的技能；不能假设 Codex 全局技能、工具 ID 和代理会话也在 Cursor 中存在。
 
 功能修复采用 systematic-debugging 和有行为 RED 的测试流程；界面用 frontend-ui-engineering；提交用 git-workflow-and-versioning；任务执行保持精确文件范围、一次功能 writer 和独立 Spec/Quality review。使用新证据推进，不重新执行已经验收的整批任务。
 

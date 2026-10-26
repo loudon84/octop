@@ -131,6 +131,7 @@ def _stream_manager(
     config = replace(
         HarnessAgentConfig(),
         workspace_dir=workspace,
+        backend={"type": "local_shell", "root_dir": str(workspace.resolve()), "virtual_mode": True},
         providers=providers,
         default_model="test-provider/test-model",
         memory=None,

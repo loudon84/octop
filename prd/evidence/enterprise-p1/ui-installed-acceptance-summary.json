@@ -1,0 +1,454 @@
+{
+  "scope": "Local real Octop installation/auth/plugins/graph/UI; synthetic HTTP sources and LLM only",
+  "fresh_home_initial_checks": {
+    "agent_id": "QTZS6H",
+    "thread_id": "thr_01M5W4G9KT68NR6EAFRMFDV4WR",
+    "connection_id": "c9bb6782-bed9-4ce8-9908-8e75fe43d375",
+    "connection_revision": 1,
+    "grant_revision": 1,
+    "binding_revision": 1,
+    "search_revision": 1,
+    "graph_operation_statuses": [
+      "COMPLETED",
+      "COMPLETED"
+    ],
+    "graph_operation_ids": [
+      "ce172a85-d235-49dd-bdbb-615cda9cee51",
+      "eb8ad245-ee87-4061-8951-802e1d31206b"
+    ],
+    "knowledge_evidence_counts": [
+      1,
+      1
+    ],
+    "history_assistant_answer_count": 2,
+    "history_assistant_message_ids_unique": true,
+    "anonymous_protected_api_status": 401
+  },
+  "final_normal_zip_install": {
+    "install_status": 200,
+    "plugin_id": "enterprise-knowledge",
+    "file_count": 30,
+    "hashes": {
+      "plugin.yaml": "c947e0636b326ff067e754349e4cea9dbee1a23423ab715b45464cb910ca30e6",
+      "main.py": "0ed2f009d16b75a6285172fcec22a842e53e71af100072d9fcafa9b76f32729f",
+      "ui/dist/index.js": "2eb1b69ab58d93796795a9bf345922eb7b50aaf41b713147b79f2f8dd0d6bf29",
+      "ui/dist/manifest.json": "c596af235191c351f1bba1cffd64e146536ba3d1e2515e44a4c00e8e1b395373"
+    }
+  },
+  "observed_operations": [
+    {
+      "operation_id": "3f0e75ba-7979-4c10-835f-2cea5390595f",
+      "thread_id": "thr_01M5W4JEVV2SHKPM6ANDJCMD6R",
+      "mode": "WEB_ONLY",
+      "status": "COMPLETED",
+      "session_revision": 3
+    },
+    {
+      "operation_id": "4d14ac7b-a063-4e97-8013-efc73212a59e",
+      "thread_id": "thr_01M5W4JEVV2SHKPM6ANDJCMD6R",
+      "mode": "WEB_ONLY",
+      "status": "VALIDATING",
+      "session_revision": 3
+    },
+    {
+      "operation_id": "7f41171c-dd92-4026-b0cc-b4287c909322",
+      "thread_id": "thr_01M5W4JEVV2SHKPM6ANDJCMD6R",
+      "mode": "KB_ONLY",
+      "status": "COMPLETED",
+      "session_revision": 7
+    },
+    {
+      "operation_id": "b759df7c-14e3-4fab-9ea9-ed45be026584",
+      "thread_id": "thr_01M5W4JEVV2SHKPM6ANDJCMD6R",
+      "mode": "HYBRID",
+      "status": "COMPLETED",
+      "session_revision": 6
+    },
+    {
+      "operation_id": "ce172a85-d235-49dd-bdbb-615cda9cee51",
+      "thread_id": "thr_01M5W4G9KT68NR6EAFRMFDV4WR",
+      "mode": "KB_ONLY",
+      "status": "COMPLETED",
+      "session_revision": 1
+    },
+    {
+      "operation_id": "d4b8365f-c0b9-4873-98ee-7934809b8bfa",
+      "thread_id": "thr_01M5W4JEVV2SHKPM6ANDJCMD6R",
+      "mode": "WEB_ONLY",
+      "status": "COMPLETED",
+      "session_revision": 8
+    },
+    {
+      "operation_id": "e4704dcb-77ff-4a20-9206-e1a6f51ae07f",
+      "thread_id": "thr_01M5W4JEVV2SHKPM6ANDJCMD6R",
+      "mode": "KB_ONLY",
+      "status": "COMPLETED",
+      "session_revision": 1
+    },
+    {
+      "operation_id": "eb8ad245-ee87-4061-8951-802e1d31206b",
+      "thread_id": "thr_01M5W4G9KT68NR6EAFRMFDV4WR",
+      "mode": "KB_ONLY",
+      "status": "COMPLETED",
+      "session_revision": 2
+    }
+  ],
+  "source_requests_before_final_zip": {
+    "request_count": 43,
+    "path_counts": {
+      "firecrawl:POST:/v2/search": 4,
+      "searxng:POST:/search": 5,
+      "weknora:GET:/api/v1/chunks/{id}": 4,
+      "weknora:GET:/api/v1/knowledge-bases": 20,
+      "weknora:GET:/api/v1/knowledge/{id}": 4,
+      "weknora:POST:/api/v1/knowledge-search": 6
+    },
+    "recent_requests": [
+      {
+        "sequence": 1,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 2,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 3,
+        "provider": "weknora",
+        "method": "POST",
+        "path": "/api/v1/knowledge-search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 4,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 5,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 6,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/chunks/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 7,
+        "provider": "searxng",
+        "method": "POST",
+        "path": "/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 8,
+        "provider": "firecrawl",
+        "method": "POST",
+        "path": "/v2/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 9,
+        "provider": "searxng",
+        "method": "POST",
+        "path": "/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 10,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 11,
+        "provider": "weknora",
+        "method": "POST",
+        "path": "/api/v1/knowledge-search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 12,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 13,
+        "provider": "weknora",
+        "method": "POST",
+        "path": "/api/v1/knowledge-search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 14,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 15,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 16,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 17,
+        "provider": "weknora",
+        "method": "POST",
+        "path": "/api/v1/knowledge-search",
+        "contains_canary": true
+      },
+      {
+        "sequence": 18,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 19,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 20,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/chunks/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 21,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 22,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 23,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/chunks/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 24,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 25,
+        "provider": "searxng",
+        "method": "POST",
+        "path": "/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 26,
+        "provider": "firecrawl",
+        "method": "POST",
+        "path": "/v2/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 27,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 28,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 29,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 30,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 31,
+        "provider": "weknora",
+        "method": "POST",
+        "path": "/api/v1/knowledge-search",
+        "contains_canary": true
+      },
+      {
+        "sequence": 32,
+        "provider": "searxng",
+        "method": "POST",
+        "path": "/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 33,
+        "provider": "firecrawl",
+        "method": "POST",
+        "path": "/v2/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 34,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 35,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 36,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 37,
+        "provider": "weknora",
+        "method": "POST",
+        "path": "/api/v1/knowledge-search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 38,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 39,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 40,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/chunks/{id}",
+        "contains_canary": false
+      },
+      {
+        "sequence": 41,
+        "provider": "weknora",
+        "method": "GET",
+        "path": "/api/v1/knowledge-bases",
+        "contains_canary": false
+      },
+      {
+        "sequence": 42,
+        "provider": "searxng",
+        "method": "POST",
+        "path": "/search",
+        "contains_canary": false
+      },
+      {
+        "sequence": 43,
+        "provider": "firecrawl",
+        "method": "POST",
+        "path": "/v2/search",
+        "contains_canary": false
+      }
+    ],
+    "canary_request_counts": {
+      "knowledge": 2,
+      "public": 0,
+      "unknown": 0
+    },
+    "record_limit": 256,
+    "egress_blocked": true
+  },
+  "lifecycle_actions": {
+    "policy_disabled_then_enabled": true,
+    "employee_grant_revoked_revision": 2,
+    "employee_original_A_grant_restored_revision": 3,
+    "knowledge_disabled_then_enabled": true
+  },
+  "quality": {
+    "make_all": {
+      "exit_code": 0,
+      "passed": 5728,
+      "skipped": 236,
+      "warnings": 94
+    },
+    "plugin_ui_tests": 162,
+    "dashboard_tests": 1568,
+    "dashboard_test_files": 284,
+    "dashboard_lint_errors": 0,
+    "dashboard_lint_existing_warnings": 67,
+    "dashboard_test_command": "npm test -- --maxWorkers=4",
+    "dashboard_test_exit_code": 0,
+    "dashboard_test_duration_seconds": 299.3
+  },
+  "openspec": {
+    "enterprise-knowledge-plugin-ui": "13/13",
+    "enterprise-knowledge-p1": "15/29",
+    "enterprise-user-private-knowledge": "6/18",
+    "strict_validation_exit_code": 0
+  },
+  "additional_integration": {
+    "related_tests": 29,
+    "actual_frontend_composer_host_queue_send": true,
+    "two_distinct_follow_up_operations": true,
+    "hitl_pending_id_forwarded": true,
+    "http_and_websocket_boundaries": "synthetic",
+    "real_browser_or_sdk_hitl_claimed": false,
+    "independent_review": "PASS"
+  }
+}

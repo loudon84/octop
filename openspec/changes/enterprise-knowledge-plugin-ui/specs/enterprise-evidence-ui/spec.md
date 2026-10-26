@@ -38,6 +38,12 @@ History reopen SHALL resolve retained server evidence within normal conversation
 - **WHEN** an authorized user reopens a past tool result
 - **THEN** source metadata comes from retained evidence and any new read is reauthorized before fetching
 
+#### Scenario: Tool result precedes operation completion
+- **WHEN** evidence.list returns a valid current-context operation that is still VALIDATING, RETRIEVING or GENERATING
+- **THEN** the card shows a localized pending state, does not trust partial evidence, and rechecks the authenticated local action within a bounded waiting window; a still-pending result is not shown as a generic failure and offers manual refresh after automatic waiting stops
+- **AND** completion loads only validated registered evidence, while cancellation, access denial, context change or unmount stops automatic requests and prevents stale results from appearing
+- **AND** DENIED, FAILED, CANCELLED and INTERRUPTED are stopping terminal states; unknown operation states are invalid and MUST NOT be polled
+
 ### Requirement: Evidence actions follow authenticated context
 History and current evidence MUST load through evidence.list using version 1 and an operation_id. Text and continuation SHALL use evidence.read; original availability SHALL use evidence.original with operation_id and evidence_id. Actions MUST carry current agent/thread context, never a browser-chosen provider URL. Available originals SHALL use only opaque authenticated host resources.
 

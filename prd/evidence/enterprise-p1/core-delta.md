@@ -61,3 +61,7 @@ P08c当前状态补充：前述实施中为历史记录；实际第三轮Fix3独
 
 
 P09c1 通用工具展示上下文修正（独立Spec/Builder规划PASS，尚未实施）：只改dashboard/src/plugins/toolRenderers/host.ts、dashboard/src/pages/Chat/ChatToolDockContext.tsx、dashboard/src/pages/Chat/components/MessageBubble.tsx，新增components/ToolDetailsInline.presentationContext.test.tsx（components相对Chat）。内部可选getter仅更新locale/theme；捕获agent/thread/auth/registry/lease不变，Host引用、reader状态和continuation不因展示更新而重建。精确合同tool-presentation-context-contract.md；四路径编辑前基线已捕获，当前P09b唯一功能作者完成冻结后再派发。
+
+B03a Windows 静态模块 MIME（2026-10-26，待实施/审查/浏览器复验）：真实新实例 /assets/index.Cjkl2BMC.js 返回200但Content-Type=text/plain，浏览器停在初始加载页。仅开放 src/octop/api/app.py 的 _dashboard_response 为 .js/.mjs/.css 指定合法媒体类型；tests/unit/api/test_dashboard_cache.py 及必要 tests/integration/test_dashboard_serve.py 模拟错误系统映射验证类型、原缓存/404和路径边界。其它后缀沿用推断。不改Windows注册表、认证、CSP、缓存策略、插件业务或Host接口。这是通用静态传输兼容修复，未通过前不记浏览器验收成功。
+
+- 2026-10-26 B03g：通用HITL输入框保留服务端pending_id，经PendingAsk→routeGuardedChatSend→现有resume hook透传，防止同thread旧pause被兼容回退改答新pause。白名单仅dashboard Chat/utils/pendingHitl.ts、Chat/index.tsx及限定回归；无enterprise硬编码，无新DTO字段或后端授权变更。实施与审查见本轮UI执行计划。

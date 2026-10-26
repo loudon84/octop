@@ -169,6 +169,7 @@ export async function routeGuardedChatSend(args: {
   resumeHitl: (
     actions: { type: "respond"; message: string }[],
     threadId?: string,
+    pendingId?: string,
   ) => void;
   handleSend: (
     text: string,
@@ -210,6 +211,7 @@ export async function routeGuardedChatSend(args: {
     resumeHitl(
       ask.actions.map(() => ({ type: "respond", message: trimmed })),
       targetThreadId,
+      ask.pendingId,
     );
     return { status: "accepted" };
   }
@@ -1118,7 +1120,8 @@ function ChatPageInner() {
         hasPendingHitlForThread: (threadId) =>
           hasPendingHitl(chatStore.getSnapshot(threadId).messages),
         interceptUserMessage,
-        resumeHitl,
+        resumeHitl: (actions, threadId, pendingId) =>
+          resumeHitl(actions, threadId, undefined, undefined, pendingId),
         handleSend,
         warn: (key) => antMessage.warning(t(key)),
       }),

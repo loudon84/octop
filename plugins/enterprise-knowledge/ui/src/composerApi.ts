@@ -1,7 +1,13 @@
-import { action, type ActionHost } from "./api";
+import { action } from "./api";
+import type { PluginHost } from "./host";
 
 export const SCHEMA_ID = "octop.enterprise.knowledge.v1" as const;
 export type KnowledgeMode = "KB_ONLY" | "WEB_ONLY" | "HYBRID";
+export type ActionTarget = {
+  agentId: string;
+  threadId: string;
+  generation: string;
+};
 
 export type SessionCapabilities = {
   can_save_selection: boolean;
@@ -46,6 +52,55 @@ export type SessionSourceRevisions = {
 
 export type CatalogItem = { kb_id: string; name: string };
 
+async function actionAtTarget<T>(
+  host: PluginHost,
+  name: string,
+  payload: object,
+  target: ActionTarget,
+  signal?: AbortSignal,
+): Promise<T> {
+  const isCurrent = () => {
+    const current = host.getContext();
+    return Boolean(
+      current &&
+        current.agentId === target.agentId &&
+        current.generation === target.generation &&
+        (!current.threadId || current.threadId === target.threadId),
+    );
+  };
+  if (!target.agentId || !target.threadId || !isCurrent())
+    throw new Error("Composer context changed");
+  if (signal?.aborted) throw new Error("Composer preparation cancelled");
+  const targetHost = {
+    getContext: () => ({ agentId: target.agentId, threadId: target.threadId }),
+    request: <T = unknown>(path: string, init?: RequestInit) =>
+      host.request<T>(path, { ...init, signal }),
+  };
+  let response: T;
+  try {
+    response = await action<T>(targetHost, name, payload);
+  } catch (error) {
+    if (!isCurrent()) throw new Error("Composer context changed");
+    if (signal?.aborted) throw new Error("Composer preparation cancelled");
+    throw error;
+  }
+  if (!isCurrent()) throw new Error("Composer context changed");
+  if (signal?.aborted) throw new Error("Composer preparation cancelled");
+  return response;
+}
+
+function sessionAction<T>(
+  host: PluginHost,
+  name: string,
+  payload: object,
+  target?: ActionTarget,
+  signal?: AbortSignal,
+): Promise<T> {
+  return target
+    ? actionAtTarget(host, name, payload, target, signal)
+    : action<T>(host, name, payload);
+}
+
 export type CatalogOutput = {
   connection_id: string;
   observed_revision: number;
@@ -73,52 +128,91 @@ export type QueryApprovalOutput = {
   };
 };
 
-export function getSession(host: ActionHost) {
-  return action<SessionOutput>(host, "session.get", {});
+export function getSession(
+  host: PluginHost,
+  target?: ActionTarget,
+  signal?: AbortSignal,
+) {
+  return sessionAction<SessionOutput>(host, "session.get", {}, target, signal);
 }
 
 export function saveSession(
-  host: ActionHost,
+  host: PluginHost,
   payload: {
     expected_revision: number;
     selected_kb_ids: string[];
     mode: KnowledgeMode;
     source_revisions: SessionSourceRevisions;
   },
+  target?: ActionTarget,
+  signal?: AbortSignal,
 ) {
-  return action<SessionOutput>(host, "session.save", {
-    schema_id: SCHEMA_ID,
-    version: 1,
-    ...payload,
-  });
+  return sessionAction<SessionOutput>(
+    host,
+    "session.save",
+    {
+      schema_id: SCHEMA_ID,
+      version: 1,
+      ...payload,
+    },
+    target,
+    signal,
+  );
 }
 
 export function loadCatalog(
-  host: ActionHost,
+  host: PluginHost,
   connection_id: string,
   expected_revision: number,
+  target?: ActionTarget,
+  signal?: AbortSignal,
 ) {
-  return action<CatalogOutput>(host, "connection.catalog", {
-    connection_id,
-    expected_revision,
-  });
+  return sessionAction<CatalogOutput>(
+    host,
+    "connection.catalog",
+    {
+      connection_id,
+      expected_revision,
+    },
+    target,
+    signal,
+  );
 }
 
-export function prepareOperation(host: ActionHost, expected_session_revision: number) {
-  return action<OperationOutput>(host, "operation.prepare", {
-    schema_id: SCHEMA_ID,
-    version: 1,
-    expected_session_revision,
-  });
+export function prepareOperation(
+  host: PluginHost,
+  expected_session_revision: number,
+  target?: ActionTarget,
+  signal?: AbortSignal,
+) {
+  return sessionAction<OperationOutput>(
+    host,
+    "operation.prepare",
+    {
+      schema_id: SCHEMA_ID,
+      version: 1,
+      expected_session_revision,
+    },
+    target,
+    signal,
+  );
 }
 
 export function approveQuery(
-  host: ActionHost,
+  host: PluginHost,
   operation_id: string,
   public_query: string,
+  target?: ActionTarget,
+  signal?: AbortSignal,
 ) {
-  return action<QueryApprovalOutput>(host, "query.approve", {
-    operation_id,
-    public_query,
-  });
+  return sessionAction<QueryApprovalOutput>(
+    host,
+    "query.approve",
+    {
+      operation_id,
+      public_query,
+    },
+    target,
+    signal,
+  );
 }
