@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,11 @@ from octop.infra.agents.plugins.execution import (
     issue_execution_ticket,
     reset_ticket,
 )
-from octop.infra.agents.plugins.host_contracts import PluginActionError, PluginActor
+from octop.infra.agents.plugins.host_contracts import (
+    PluginActionError,
+    PluginActor,
+    RecordWrite,
+)
 from tests.support.enterprise import install_enterprise_knowledge
 
 
@@ -954,6 +959,179 @@ async def test_public_sdk_policy_modes_preserve_native_cached_search_calls(
             "enterprise_knowledge_search": 1,
             **({"tool_search": 1} if deferred else {}),
         }
+
+
+@pytest.mark.asyncio
+async def test_real_graph_enforces_kb_web_and_hybrid_source_order(
+    app_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = await _setup_policy_scenario(app_client, monkeypatch)
+    search_http = import_module(
+        "harness_plugin_enterprise_knowledge.enterprise_knowledge.search_http"
+    )
+    web_requests: list[str] = []
+    web_after_knowledge_counts: list[int] = []
+
+    async def web_source(request: httpx.Request) -> httpx.Response:
+        web_requests.append(request.url.path)
+        web_after_knowledge_counts.append(len(scenario.requests))
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Public result",
+                        "url": "https://public.example/result",
+                        "content": "public evidence",
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    monkeypatch.setattr(
+        search_http,
+        "_make_client",
+        lambda _ca, _transport: httpx.AsyncClient(transport=httpx.MockTransport(web_source)),
+    )
+    search_saved = await scenario.client.post(
+        "/api/plugins/enterprise-knowledge/actions/search.save",
+        headers=scenario.admin_auth,
+        json={
+            "api_version": 1,
+            "payload": {
+                "expected_revision": 0,
+                "primary": {"base_url": "https://searx.example"},
+                "secondary": {"base_url": "https://firecrawl.example"},
+            },
+        },
+    )
+    assert search_saved.status_code == 200, search_saved.text
+    binding = await scenario.client.post(
+        "/api/plugins/enterprise-knowledge/actions/binding.save",
+        headers=scenario.admin_auth,
+        json={
+            "api_version": 1,
+            "context": {"agent_id": scenario.agent_id},
+            "payload": {
+                "expected_revision": 1,
+                "connection_ref": scenario.connection_id,
+                "expert_allowed_kb_ids": ["kb-a"],
+                "default_kb_ids": ["kb-a"],
+                "web_allowed": True,
+                "enabled": True,
+            },
+        },
+    )
+    assert binding.status_code == 200, binding.text
+    for component in ("LIST", "SEARCH", "READ"):
+        key = f"{scenario.connection_id}:{component}"
+        await scenario.facade.commit(
+            (
+                RecordWrite(
+                    "connection_probes",
+                    key,
+                    scenario.user_id,
+                    {
+                        "schema_id": "octop.enterprise.knowledge.v1",
+                        "version": 1,
+                        "connection_id": scenario.connection_id,
+                        "component": component,
+                        "observed_revision": 1,
+                        "checked_at": datetime.now(UTC).isoformat(),
+                        "status": "SUCCESS",
+                        "error_code": None,
+                    },
+                    0,
+                ),
+            )
+        )
+    await scenario.registry.reload(scenario.agent_id)
+
+    for mode in ("KB_ONLY", "WEB_ONLY", "HYBRID"):
+        thread = await scenario.client.post(
+            f"/api/agents/{scenario.agent_id}/threads", headers=scenario.employee_auth
+        )
+        assert thread.status_code == 201, thread.text
+        thread_id = thread.json()["thread_id"]
+        context = {"agent_id": scenario.agent_id, "thread_id": thread_id}
+        snapshot_response = await scenario.client.post(
+            "/api/plugins/enterprise-knowledge/actions/session.get",
+            headers=scenario.employee_auth,
+            json={"api_version": 1, "context": context, "payload": {}},
+        )
+        assert snapshot_response.status_code == 200, snapshot_response.text
+        snapshot = snapshot_response.json()["result"]["session"]
+        selected = [] if mode == "WEB_ONLY" else ["kb-a"]
+        saved = await scenario.client.post(
+            "/api/plugins/enterprise-knowledge/actions/session.save",
+            headers=scenario.employee_auth,
+            json={
+                "api_version": 1,
+                "context": context,
+                "payload": {
+                    "expected_revision": 0,
+                    "selected_kb_ids": selected,
+                    "mode": mode,
+                    "source_revisions": {
+                        "connection_id": snapshot["connection_id"],
+                        "config_revision": snapshot["config_revision"],
+                        "binding_revision": snapshot["binding_revision"],
+                        "grant_revision": snapshot["grant_revision"],
+                        "search_revision": snapshot["search_revision"],
+                    },
+                },
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        prepared = await scenario.client.post(
+            "/api/plugins/enterprise-knowledge/actions/operation.prepare",
+            headers=scenario.employee_auth,
+            json={
+                "api_version": 1,
+                "context": context,
+                "payload": {"expected_session_revision": 1},
+            },
+        )
+        assert prepared.status_code == 200, prepared.text
+        operation_id = prepared.json()["result"]["operation"]["operation_id"]
+        public_query = f" exact public {mode} query "
+        if mode != "KB_ONLY":
+            approved = await scenario.client.post(
+                "/api/plugins/enterprise-knowledge/actions/query.approve",
+                headers=scenario.employee_auth,
+                json={
+                    "api_version": 1,
+                    "context": context,
+                    "payload": {
+                        "operation_id": operation_id,
+                        "public_query": public_query,
+                    },
+                },
+            )
+            assert approved.status_code == 200, approved.text
+        knowledge_before = len(scenario.requests)
+        web_before = len(web_requests)
+        frames = await scenario.stream_turn(
+            operation_id,
+            f"private {mode} question",
+            marker={"version": 1, "text": f"private {mode} question"},
+            target_thread_id=thread_id,
+            configurable={"conversation_mode": "craft"},
+        )
+        assert any(frame.get("type") == "token" for frame in frames)
+        knowledge_delta = scenario.requests[knowledge_before:]
+        web_delta = web_requests[web_before:]
+        record = await scenario.facade.get_record("operations", operation_id)
+        if mode == "HYBRID":
+            assert record is not None and record.payload["status"] == "COMPLETED", record.payload
+        assert knowledge_delta == (
+            [] if mode == "WEB_ONLY" else ["/api/v1/knowledge-bases", "/api/v1/knowledge-search"]
+        ), (mode, record.payload if record is not None else None, frames)
+        assert web_delta == ([] if mode == "KB_ONLY" else ["/search"])
+        if mode == "HYBRID":
+            assert web_after_knowledge_counts[-1] == knowledge_before + 2
+        assert record is not None and record.payload["status"] == "COMPLETED"
 
 
 @pytest.mark.asyncio

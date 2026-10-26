@@ -4,6 +4,7 @@ import asyncio
 import sys
 from importlib import import_module
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
@@ -187,6 +188,60 @@ def test_replaced_approval_cannot_be_consumed_and_current_query_is_exact() -> No
     assert asyncio.run(service.consume_approval(actor, current.approval_id, 1)) == current_query
 
 
+def test_reloaded_facade_cannot_reuse_an_old_in_memory_approval() -> None:
+    facade = _MemoryFacade()
+    service = OperationService(facade)
+    actor = PluginActor(user_id=7, is_admin=False, agent_id="agent-1", thread_id="thread-1")
+    session = SessionSnapshot(
+        agent_id="agent-1", thread_id="thread-1", revision=0, selection_present=False
+    )
+    operation = asyncio.run(service.create(actor, session))
+    asyncio.run(service.approve(actor, operation.operation_id, "approved before reload"))
+
+    replacement = _MemoryFacade()
+    replacement.records = facade.records
+
+    assert (
+        asyncio.run(OperationService(replacement).approved_query(actor, operation.operation_id))
+        is None
+    )
+
+
+def test_operation_cancel_atomically_invalidates_approval_and_active_search() -> None:
+    facade = _MemoryFacade()
+    service = OperationService(facade)
+    actor = PluginActor(user_id=7, is_admin=False, agent_id="agent-1", thread_id="thread-1")
+    session = SessionSnapshot(
+        agent_id="agent-1", thread_id="thread-1", revision=0, selection_present=False
+    )
+    operation = asyncio.run(service.create(actor, session))
+    approval = asyncio.run(service.approve(actor, operation.operation_id, "public query"))
+    facade.records[("search_executions", operation.operation_id)] = HostRecord(
+        id=operation.operation_id,
+        namespace="search_executions",
+        logical_key=operation.operation_id,
+        owner_user_id=actor.user_id,
+        revision=1,
+        payload={
+            "operation_id": operation.operation_id,
+            "state": "PRIMARY_RESERVED",
+            "active_role": "PRIMARY",
+        },
+    )
+
+    cancelled = asyncio.run(
+        service.transition(actor, operation.operation_id, operation.revision + 1, "CANCELLED")
+    )
+
+    assert cancelled.status == "CANCELLED"
+    approval_record = facade.records[("approvals", approval.approval_id)]
+    execution = facade.records[("search_executions", operation.operation_id)]
+    assert approval_record.payload["state"] == "CANCELLED"
+    assert execution.payload["state"] == "CANCELLED"
+    assert execution.payload["active_role"] is None
+    assert asyncio.run(service.approved_query(actor, operation.operation_id)) is None
+
+
 def test_evidence_requires_successful_source_and_all_knowledge_ids() -> None:
     facade = _MemoryFacade()
     operations = OperationService(facade)
@@ -263,6 +318,9 @@ def test_evidence_requires_successful_source_and_all_knowledge_ids() -> None:
         )
     )
     assert len(saved) == 1
+    assert UUID(saved[0].evidence_id).version == 4
+    assert saved[0].operation_id == operation.operation_id
+    assert saved[0].provider == "WEKNORA"
     assert (
         asyncio.run(evidence.get(actor, operation.operation_id, saved[0].evidence_id)) == saved[0]
     )
@@ -272,3 +330,19 @@ def test_evidence_requires_successful_source_and_all_knowledge_ids() -> None:
     other_thread = PluginActor(user_id=7, is_admin=False, agent_id="agent-1", thread_id="thread-2")
     with pytest.raises(PluginActionError):
         asyncio.run(evidence.get(other_thread, operation.operation_id, saved[0].evidence_id))
+    key = (
+        "evidence",
+        f'["{operation.operation_id}","{saved[0].evidence_id}"]',
+    )
+    registered = facade.records[key]
+    facade.records[key] = HostRecord(
+        id=registered.id,
+        namespace=registered.namespace,
+        logical_key=registered.logical_key,
+        owner_user_id=registered.owner_user_id,
+        revision=registered.revision,
+        payload={**registered.payload, "user_id": 8},
+    )
+    with pytest.raises(PluginActionError) as forged:
+        asyncio.run(evidence.list_for_operation(actor, operation.operation_id))
+    assert forged.value.code == "ACCESS_DENIED"

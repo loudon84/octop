@@ -57,21 +57,31 @@ def _save_input(
     secondary_credential: str | None = None,
     primary_op: str = "KEEP",
     primary_credential: str | None = None,
+    primary_ca_op: str = "KEEP",
+    primary_ca_bundle: str | None = None,
+    secondary_ca_op: str = "KEEP",
+    secondary_ca_bundle: str | None = None,
 ) -> Any:
     from enterprise_knowledge.search_settings import SearchSaveInput, SearchSourceSavePart
 
     primary_kwargs: dict[str, Any] = {
         "base_url": primary_url,
         "credential_op": primary_op,
+        "ca_op": primary_ca_op,
     }
     if primary_credential is not None:
         primary_kwargs["credential"] = SecretStr(primary_credential)
+    if primary_ca_bundle is not None:
+        primary_kwargs["ca_bundle"] = primary_ca_bundle
     secondary_kwargs: dict[str, Any] = {
         "base_url": secondary_url,
         "credential_op": secondary_op,
+        "ca_op": secondary_ca_op,
     }
     if secondary_credential is not None:
         secondary_kwargs["credential"] = SecretStr(secondary_credential)
+    if secondary_ca_bundle is not None:
+        secondary_kwargs["ca_bundle"] = secondary_ca_bundle
     return SearchSaveInput(
         expected_revision=revision,
         primary=SearchSourceSavePart(**primary_kwargs),
@@ -140,6 +150,7 @@ async def test_searxng_replace_credential_rejected(tmp_path: Path) -> None:
         expected_revision=0,
         primary=SearchSourceSavePart.model_construct(
             base_url="https://searx.example/",
+            ca_op="KEEP",
             ca_bundle=None,
             credential_op="REPLACE",
             credential=SecretStr("nope"),
@@ -409,3 +420,114 @@ async def test_secondary_test_uses_bearer_and_records_error_without_query_leak(
     dumped = json.dumps(result.model_dump())
     assert "secret-query-sentinel" not in dumped
     assert "fc-token" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_ca_keep_replace_clear_and_cas_preserves_old(tmp_path: Path) -> None:
+    from enterprise_knowledge.search_settings import SEARCH_SOURCES, SearchSettingsService
+
+    from octop.infra.agents.plugins.host_contracts import PluginActionError, PluginActor
+
+    _, actor_id, facade = _host(tmp_path)
+    service = SearchSettingsService(facade)
+    admin = PluginActor(actor_id, True)
+    ca_pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+    with_ca = await service.save(
+        admin,
+        _save_input(primary_ca_op="REPLACE", primary_ca_bundle=ca_pem),
+    )
+    assert with_ca.primary.ca_bundle_configured is True
+
+    # KEEP while editing URL must retain CA (omit ca_bundle).
+    kept = await service.save(
+        admin,
+        _save_input(revision=with_ca.revision, primary_url="https://searx-new.example/"),
+    )
+    assert kept.primary.base_url == "https://searx-new.example"
+    assert kept.primary.ca_bundle_configured is True
+    stored = await facade.get_record(SEARCH_SOURCES, "default")
+    assert stored is not None
+    assert stored.payload["primary"]["ca_bundle"] == ca_pem
+
+    # CAS conflict must not mutate stored CA.
+    with pytest.raises(PluginActionError) as conflict:
+        await service.save(
+            admin,
+            _save_input(
+                revision=0,
+                primary_ca_op="CLEAR",
+                primary_url="https://searx-conflict.example/",
+            ),
+        )
+    assert conflict.value.code == "CONFIG_CONFLICT"
+    after_conflict = await facade.get_record(SEARCH_SOURCES, "default")
+    assert after_conflict is not None
+    assert after_conflict.revision == kept.revision
+    assert after_conflict.payload["primary"]["ca_bundle"] == ca_pem
+
+    cleared = await service.save(
+        admin,
+        _save_input(revision=kept.revision, primary_ca_op="CLEAR"),
+    )
+    assert cleared.primary.ca_bundle_configured is False
+    cleared_rec = await facade.get_record(SEARCH_SOURCES, "default")
+    assert cleared_rec is not None
+    assert cleared_rec.payload["primary"]["ca_bundle"] is None
+
+
+@pytest.mark.asyncio
+async def test_employee_search_get_whitelist_via_action(tmp_path: Path) -> None:
+    from enterprise_knowledge.models import EmptyInput
+    from enterprise_knowledge.search_settings import (
+        _EMPLOYEE_GET_KEYS,
+        SearchSettingsEmployeeOutput,
+        SearchSettingsService,
+    )
+    from enterprise_knowledge.search_settings_actions import register_search_actions
+
+    from octop.infra.agents.plugins.host_contracts import PluginActor
+
+    db, actor_id, facade = _host(tmp_path)
+    admin = PluginActor(actor_id, True)
+    await SearchSettingsService(facade).save(
+        admin,
+        _save_input(
+            primary_ca_op="REPLACE",
+            primary_ca_bundle="-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----",
+            secondary_op="REPLACE",
+            secondary_credential="fc-secret",
+        ),
+    )
+    specs = {spec.name: spec for spec in register_search_actions(facade)}
+    get_spec = specs["search.get"]
+    employee = PluginActor(_employee(db), False)
+    result = await get_spec.handler(employee, EmptyInput())
+    dumped = result.root.model_dump(mode="json")
+    assert set(dumped.keys()) <= _EMPLOYEE_GET_KEYS
+    assert set(dumped.keys()) == _EMPLOYEE_GET_KEYS
+    assert isinstance(result.root, SearchSettingsEmployeeOutput)
+    assert "primary" not in dumped
+    assert "secondary" not in dumped
+    assert "diagnostics" not in dumped
+    assert "base_url" not in json.dumps(dumped)
+    assert "certificate" not in json.dumps(dumped).lower()
+    assert "fc-secret" not in json.dumps(dumped)
+
+    # Real Host invoke_action path (output schema validation).
+    for action in register_search_actions(facade):
+        facade.register_action(
+            action.name,
+            action.input_model,
+            action.output_model,
+            action.handler,
+            action.summary,
+            action.permission,
+        )
+    invoked = await facade.invoke_action("search.get", employee, {})
+    assert set(invoked.keys()) <= _EMPLOYEE_GET_KEYS
+    assert invoked["web_search_ready"] is True
+
+    admin_view = await facade.invoke_action("search.get", admin, {})
+    assert "primary" in admin_view
+    assert admin_view["primary"]["ca_bundle_configured"] is True
+    assert "BEGIN CERTIFICATE" not in json.dumps(admin_view)

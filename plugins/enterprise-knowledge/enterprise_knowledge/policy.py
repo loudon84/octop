@@ -94,7 +94,7 @@ class ScopePolicy:
         self, actor: PluginActor, requested_ids: Sequence[str] | None = None
     ) -> ScopeDecision:
         binding, connection, grant, session = await self._current(actor)
-        if session.mode != "KB_ONLY":
+        if session.mode not in {"KB_ONLY", "HYBRID"}:
             raise _fail(actor, "MODE_NOT_ALLOWED", 409)
         locally_allowed = self._local_scope(binding.payload, connection, grant, actor)
         local_query_scope = sorted(locally_allowed & set(session.selected_kb_ids))
@@ -137,7 +137,7 @@ class ScopePolicy:
     async def catalog(self, actor: PluginActor) -> list[dict[str, Any]]:
         """Return metadata within the first four layers; session selection is not applied."""
         binding, connection, grant, session = await self._current(actor)
-        if session.mode != "KB_ONLY":
+        if session.mode not in {"KB_ONLY", "HYBRID"}:
             raise _fail(actor, "MODE_NOT_ALLOWED", 409)
         local_scope = self._local_scope(binding.payload, connection, grant, actor)
         if not local_scope:

@@ -646,6 +646,7 @@ async def test_evidence_list_rechecks_intent_for_empty_and_nonempty_results(
                 agent_id=agent_id,
                 thread_id=context["thread_id"],
                 source_kind="KNOWLEDGE",
+                provider="WEKNORA",
                 connection_id=connection_id,
                 kb_id="kb-a",
                 knowledge_id="doc-a",

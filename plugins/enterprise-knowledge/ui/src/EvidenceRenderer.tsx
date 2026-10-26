@@ -10,6 +10,9 @@ interface Evidence {
   evidence_id: string;
   operation_id: string;
   source_kind: "KNOWLEDGE" | "WEB";
+  provider: "WEKNORA" | "SEARXNG" | "FIRECRAWL";
+  degraded: boolean;
+  search_revision: number;
   connection_id: string | null;
   kb_id: string | null;
   knowledge_id: string | null;
@@ -18,6 +21,7 @@ interface Evidence {
   truncated: boolean;
   retrieved_at: string;
   source_page: number | null;
+  locator: string | null;
 }
 interface Operation {
   operation_id: string;
@@ -69,6 +73,21 @@ function validUtc(value: unknown): value is string {
     Number.isFinite(new Date(value).getTime())
   );
 }
+function validWebLocator(value: unknown): value is string {
+  if (typeof value !== "string" || value !== value.trim() || /\s/.test(value))
+    return false;
+  try {
+    const parsed = new URL(value);
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      Boolean(parsed.hostname) &&
+      !parsed.username &&
+      !parsed.password
+    );
+  } catch {
+    return false;
+  }
+}
 function parseEvidence(
   value: unknown,
   operationId: string,
@@ -93,6 +112,9 @@ function parseEvidence(
     typeof value.title !== "string" ||
     typeof value.content !== "string" ||
     typeof value.truncated !== "boolean" ||
+    typeof value.degraded !== "boolean" ||
+    !Number.isInteger(value.search_revision) ||
+    Number(value.search_revision) < 0 ||
     !validUtc(value.retrieved_at) ||
     !(
       value.source_page === null ||
@@ -106,21 +128,36 @@ function parseEvidence(
     return null;
   if (value.source_kind === "KNOWLEDGE") {
     if (
+      value.provider !== "WEKNORA" ||
+      value.degraded ||
+      value.search_revision !== 0 ||
       typeof value.connection_id !== "string" ||
       !uuid4.test(value.connection_id) ||
       typeof value.kb_id !== "string" ||
       !value.kb_id ||
       typeof value.knowledge_id !== "string" ||
-      !value.knowledge_id
+      !value.knowledge_id ||
+      value.locator !== null
     )
       return null;
   } else if (value.source_kind === "WEB") {
-    if (value.connection_id !== null) return null;
+    if (
+      (value.provider !== "SEARXNG" && value.provider !== "FIRECRAWL") ||
+      Number(value.search_revision) < 1 ||
+      value.connection_id !== null ||
+      value.kb_id !== null ||
+      value.knowledge_id !== null ||
+      !validWebLocator(value.locator)
+    )
+      return null;
   } else return null;
   return {
     evidence_id: value.evidence_id as string,
     operation_id: operationId,
     source_kind: value.source_kind,
+    provider: value.provider,
+    degraded: value.degraded,
+    search_revision: value.search_revision as number,
     connection_id: value.connection_id as string | null,
     kb_id: value.kb_id as string | null,
     knowledge_id: value.knowledge_id as string | null,
@@ -129,6 +166,7 @@ function parseEvidence(
     truncated: value.truncated,
     retrieved_at: value.retrieved_at,
     source_page: value.source_page as number | null,
+    locator: value.locator as string | null,
   };
 }
 function parseEvidenceList(
@@ -284,9 +322,7 @@ export function EvidenceRenderer(props: PluginToolProps) {
           setEvidence(rows);
           if (selectedFromState) {
             const found = rows.find(
-              (row) =>
-                row.evidence_id === selectedFromState &&
-                row.source_kind === "KNOWLEDGE",
+              (row) => row.evidence_id === selectedFromState,
             );
             if (found) setSelected(found);
             else setListError("other");
@@ -324,13 +360,7 @@ export function EvidenceRenderer(props: PluginToolProps) {
   ]);
 
   function openReader(item: Evidence) {
-    if (
-      denied.current ||
-      item.source_kind !== "KNOWLEDGE" ||
-      !props.callId ||
-      !operationId
-    )
-      return;
+    if (denied.current || !props.callId || !operationId) return;
     props.host.openSidePanel({
       callId: props.callId,
       title: t(locale, "readerTitle"),
@@ -432,7 +462,6 @@ export function EvidenceRenderer(props: PluginToolProps) {
               <li key={item.evidence_id}>
                 <button
                   type="button"
-                  disabled={item.source_kind === "WEB"}
                   onClick={() => openReader(item)}
                   aria-label={item.title + " — " + sourceLabel}
                 >
@@ -442,7 +471,7 @@ export function EvidenceRenderer(props: PluginToolProps) {
                 {item.source_kind === "WEB" && (
                   <>
                     <p>{item.content}</p>
-                    <p>{t(locale, "evidenceWebUnavailable")}</p>
+                    <p>{t(locale, "evidenceWebUntrusted")}</p>
                   </>
                 )}
                 <p>
@@ -461,16 +490,160 @@ export function EvidenceRenderer(props: PluginToolProps) {
           })}
         </ul>
       )}
-      {sidePanel && selected && (
-        <EvidenceReader
-          key={selected.evidence_id}
-          host={props.host}
-          target={target!}
-          item={selected}
-          locale={locale}
-          onAccessDenied={denyMount}
-          reloadEvidence={reload}
-        />
+      {sidePanel &&
+        selected &&
+        (selected.source_kind === "WEB" ? (
+          <WebEvidenceReader
+            key={selected.evidence_id}
+            host={props.host}
+            target={target!}
+            item={selected}
+            locale={locale}
+            onAccessDenied={denyMount}
+          />
+        ) : (
+          <EvidenceReader
+            key={selected.evidence_id}
+            host={props.host}
+            target={target!}
+            item={selected}
+            locale={locale}
+            onAccessDenied={denyMount}
+            reloadEvidence={reload}
+          />
+        ))}
+    </section>
+  );
+}
+
+function WebEvidenceReader({
+  host,
+  target,
+  item,
+  locale,
+  onAccessDenied,
+}: {
+  host: PluginToolProps["host"];
+  target: PluginToolContext;
+  item: Evidence;
+  locale: string;
+  onAccessDenied: () => void;
+}) {
+  const [state, setState] = useState<
+    "idle" | "loading" | "ready" | "source" | "error"
+  >("idle");
+  const [locator, setLocator] = useState<string | null>(null);
+  const controller = useRef<AbortController | null>(null);
+  const sequence = useRef(0);
+  const heading = useRef<HTMLHeadingElement | null>(null);
+
+  useEffect(() => {
+    ++sequence.current;
+    controller.current?.abort();
+    setState("idle");
+    setLocator(null);
+    queueMicrotask(() => heading.current?.focus());
+    return () => {
+      ++sequence.current;
+      controller.current?.abort();
+    };
+  }, [
+    host,
+    target.agentId,
+    target.threadId,
+    item.operation_id,
+    item.evidence_id,
+  ]);
+
+  async function authorizeLocator() {
+    const id = ++sequence.current;
+    const request = new AbortController();
+    controller.current?.abort();
+    controller.current = request;
+    setState("loading");
+    setLocator(null);
+    try {
+      const value = await toolAction<unknown>(
+        host,
+        target,
+        "evidence.original",
+        {
+          operation_id: item.operation_id,
+          evidence_id: item.evidence_id,
+        },
+        request.signal,
+      );
+      if (
+        sequence.current !== id ||
+        request.signal.aborted ||
+        currentTarget(host)?.agentId !== target.agentId ||
+        currentTarget(host)?.threadId !== target.threadId
+      )
+        return;
+      if (
+        !object(value) ||
+        value.schema_id !== schemaId ||
+        value.version !== 1 ||
+        value.operation_id !== item.operation_id ||
+        value.evidence_id !== item.evidence_id ||
+        value.available !== true ||
+        value.reason !== null ||
+        value.resource_token !== null ||
+        value.locator !== item.locator ||
+        !validWebLocator(value.locator)
+      )
+        throw new Error("Invalid web original response");
+      setLocator(value.locator);
+      setState("ready");
+    } catch (error) {
+      if (
+        sequence.current !== id ||
+        request.signal.aborted ||
+        currentTarget(host)?.agentId !== target.agentId ||
+        currentTarget(host)?.threadId !== target.threadId
+      )
+        return;
+      const kind = errorKind(error);
+      if (kind === "access") onAccessDenied();
+      else setState(kind === "source" ? "source" : "error");
+    } finally {
+      if (controller.current === request) controller.current = null;
+    }
+  }
+
+  return (
+    <section aria-label={t(locale, "webSourceTitle")}>
+      <h2 ref={heading} tabIndex={-1}>
+        {t(locale, "webSourceTitle")}
+      </h2>
+      <p>{item.content}</p>
+      <p>{t(locale, "evidenceWebUntrusted")}</p>
+      <button
+        type="button"
+        disabled={state === "loading"}
+        onClick={() => void authorizeLocator()}
+      >
+        {t(locale, "webSourceAuthorize")}
+      </button>
+      {state === "loading" && (
+        <p role="status" aria-live="polite">
+          {t(locale, "originalLoading")}
+        </p>
+      )}
+      {state === "source" && (
+        <p role="status" aria-live="polite">
+          {t(locale, "sourceChanged")}
+        </p>
+      )}
+      {state === "error" && (
+        <p role="status" aria-live="polite">
+          {t(locale, "originalError")}
+        </p>
+      )}
+      {state === "ready" && locator && (
+        <a href={locator} target="_blank" rel="noreferrer noopener">
+          {t(locale, "webSourceOpen")}
+        </a>
       )}
     </section>
   );

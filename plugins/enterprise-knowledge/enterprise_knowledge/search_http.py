@@ -236,7 +236,7 @@ def normalize_search_base_url(provider: SearchProvider, value: str) -> str:
     _invalid_config(safe_provider)
 
 
-def _validate_result_url(value: object) -> str:
+def validate_result_url(value: object) -> str:
     if (
         not isinstance(value, str)
         or not value
@@ -302,7 +302,7 @@ def _parse_response(provider: SearchProvider, payload: bytes) -> SearchHttpResul
             if not isinstance(title, str) or not title.strip() or _CONTROL_RE.search(title):
                 raise ValueError("invalid result title")
             title.encode("utf-8")
-            locator = _validate_result_url(row.get("url"))
+            locator = validate_result_url(row.get("url"))
             content = row.get(snippet_key, "")
             if not isinstance(content, str):
                 raise ValueError("invalid result snippet")

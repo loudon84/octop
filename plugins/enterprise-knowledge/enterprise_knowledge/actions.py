@@ -28,12 +28,16 @@ from .models import (
     OriginalInput,
     OriginalOutput,
     ProbeOutput,
+    QueryApprovalOutput,
+    QueryApproveInput,
+    QueryRevokeInput,
     ReadInput,
     ReadPage,
     SessionOutput,
     SessionSaveInput,
     SettingsOutput,
 )
+from .operations import OperationService
 from .probes import ProbeService
 from .service import KnowledgeService
 from .sessions import SessionService
@@ -105,7 +109,33 @@ def register_actions(facade: Any) -> tuple[ActionSpec, ...]:
         service = cast(KnowledgeService, facade.resolve_service("enterprise-knowledge", 1))
         return await service.evidence_list(actor, payload)
 
+    async def query_approve(actor: PluginActor, payload: QueryApproveInput) -> QueryApprovalOutput:
+        approval = await OperationService(facade).approve(
+            actor, payload.operation_id, payload.public_query
+        )
+        return QueryApprovalOutput(approval=approval)
+
+    async def query_revoke(actor: PluginActor, payload: QueryRevokeInput) -> QueryApprovalOutput:
+        approval = await OperationService(facade).revoke_for_operation(actor, payload.operation_id)
+        return QueryApprovalOutput(approval=approval)
+
     return (
+        ActionSpec(
+            "query.approve",
+            QueryApproveInput,
+            QueryApprovalOutput,
+            query_approve,
+            tr("actions.query.approve"),
+            "authenticated",
+        ),
+        ActionSpec(
+            "query.revoke",
+            QueryRevokeInput,
+            QueryApprovalOutput,
+            query_revoke,
+            tr("actions.query.revoke"),
+            "authenticated",
+        ),
         ActionSpec(
             "operation.prepare",
             OperationPrepareInput,

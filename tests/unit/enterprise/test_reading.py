@@ -251,6 +251,7 @@ def _service_fixture() -> _Facade:
         "agent_id": "agent-a",
         "thread_id": "thread-a",
         "source_kind": "KNOWLEDGE",
+        "provider": "WEKNORA",
         "connection_id": _CONNECTION_ID,
         "kb_id": "kb-a",
         "knowledge_id": "doc-a",

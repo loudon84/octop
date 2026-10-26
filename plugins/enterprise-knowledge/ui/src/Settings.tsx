@@ -2,6 +2,7 @@ import * as React from "./host";
 import type { PluginHost, PluginSurfaceContext } from "./host";
 import { action, classifyTransportError, contextKey } from "./api";
 import { t, type MessageKey } from "./i18n";
+import { SearchSettings } from "./SearchSettings";
 
 type Connection = {
   connection_id: string;
@@ -779,6 +780,7 @@ export function Settings({ host, context, location }: SurfaceProps) {
 
       {location === "connectors" && canManageConnections && (
         <>
+          <SearchSettings host={host} context={context} />
           <div className="ek-section">
             <h3>{text("connection")}</h3>
             <label>

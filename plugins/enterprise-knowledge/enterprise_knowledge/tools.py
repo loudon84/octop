@@ -59,12 +59,18 @@ def register_tools(ctx: Any) -> tuple[dict[str, Callable[..., Any]], Callable[[A
             {
                 "evidence_id": item.evidence_id,
                 "source_kind": item.source_kind,
+                "provider": item.provider,
+                "degraded": item.degraded,
                 "title": item.title,
                 "content": item.content,
+                "content_trust": (
+                    "UNTRUSTED_REFERENCE" if item.source_kind == "WEB" else "AUTHORIZED_KNOWLEDGE"
+                ),
                 "truncated": item.truncated,
                 "retrieved_at": item.retrieved_at,
                 "source_version": item.source_version,
                 "source_page": item.source_page,
+                "locator": item.locator,
             }
             for item in result.evidence
         ]

@@ -30,6 +30,8 @@
 
 13. P07b3真实无模型图纠正了先前仅检查updates的静态判断：安装版LangGraphProtocol的messages通道已把before-agent写入状态的AIMessage投为native token。公共AgentManager.stream→protocol→compiled graph→gateway实验证明模型调用0、可见文本一次、call/history单条。撤回额外custom-to-token转换和octop.assistant_text.v1候选协议，避免与原生消息双发；只保留原生链路回归，不新增核心接缝。P07c异步before-agent以合成AI state+jump_to=end输出本地化空结果/拒绝，不再发第二个writer事件。
 
+14. N04 联网执行以 `search_executions/<operation_id>` Host CAS 记录作为唯一请求账本。搜索配置 revision 进入 session、operation、approval；首次请求预留与批准消费在同一 commit，备用只递增同一记录，持久计数上限为二。公开词原文仅留当前进程内存，Host 只保存摘要；重启、发送结果未知或 commit 回执未知均不得恢复批准或重放。单源十秒和整次二十二秒覆盖授权、TLS、发送及解析；attempt 拥有 client/future，编排 service 拥有 drain，可能无界的清理不得串在备用之前。仅 timeout、429、5xx 切备；EMPTY、认证/权限/协议错误及取消不切备。完整冻结见 `prd/evidence/enterprise-p1/search-operation-contract.md`。
+
 P07b2时序补充：只读extra名单在fresh async授权后的最终短准入guard内取当前snapshot，并用既有Host task refs为声明来源增加临时generation lease，即使无持久required binding也在provider失效时取消旧invocation；不写持久requirements、不赋予员工权限。否则预备request名单与await之后选中的新图可能错配。无声明普通Agent保持原行为，普通旧/未知snapshot退回canonical名单。原始注册名与函数对应关系必须在sanitize前捕获，避免同函数不同alias误扩只读能力。
 
 ## Risks / Trade-offs

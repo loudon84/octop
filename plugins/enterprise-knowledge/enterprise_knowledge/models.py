@@ -491,6 +491,7 @@ class SessionSnapshot(StrictDto):
         knowledge_ready=False,
         web_ready=False,
     )
+    search_revision: Annotated[StrictInt, Field(ge=0)] = 0
     search_ready: StrictBool = False
     weknora_query_count: Annotated[StrictInt, Field(ge=0)] = 0
 
@@ -520,6 +521,7 @@ class SessionSourceRevisions(StrictDto):
     config_revision: Annotated[StrictInt, Field(ge=0)]
     binding_revision: Annotated[StrictInt, Field(ge=0)]
     grant_revision: Annotated[StrictInt, Field(ge=0)]
+    search_revision: Annotated[StrictInt, Field(ge=0)] = 0
 
     @field_validator("connection_id")
     @classmethod
@@ -595,7 +597,9 @@ class OperationRecord(StrictDto):
     config_revision: Annotated[StrictInt, Field(ge=0)]
     binding_revision: Annotated[StrictInt, Field(ge=0)]
     grant_revision: Annotated[StrictInt, Field(ge=0)]
+    search_revision: Annotated[StrictInt, Field(ge=0)] = 0
     connection_id: StrictStr | None = None
+    mode: Literal["KB_ONLY", "WEB_ONLY", "HYBRID"] = "KB_ONLY"
     status: Literal[
         "VALIDATING",
         "RETRIEVING",
@@ -609,6 +613,7 @@ class OperationRecord(StrictDto):
     ]
     observed_knowledge_bases: list[KnowledgeBaseSummary] | None = None
     error_code: StrictStr | None = None
+    partial_failure: StrictStr | None = None
     approval_id: StrictStr | None = None
 
     @field_validator("version", mode="before")
@@ -640,11 +645,13 @@ class QueryApproval(StrictDto):
     user_id: Annotated[StrictInt, Field(gt=0)]
     agent_id: StrictStr
     thread_id: StrictStr
-    public_query: StrictStr
+    public_query: StrictStr | None = None
+    query_digest: StrictStr | None = None
     session_revision: Annotated[StrictInt, Field(ge=0)]
     config_revision: Annotated[StrictInt, Field(ge=0)]
     binding_revision: Annotated[StrictInt, Field(ge=0)]
     grant_revision: Annotated[StrictInt, Field(ge=0)]
+    search_revision: Annotated[StrictInt, Field(ge=0)] = 0
     state: Literal["PENDING", "CONSUMED", "CANCELLED", "INVALID"] = "PENDING"
 
     @field_validator("version", mode="before")
@@ -653,6 +660,86 @@ class QueryApproval(StrictDto):
         return _version(value)
 
     @field_validator("approval_id", "operation_id")
+    @classmethod
+    def valid_uuid(cls, value: str) -> str:
+        return _validate_uuid4(value)
+
+    @field_validator("agent_id", "thread_id")
+    @classmethod
+    def valid_scope_id(cls, value: str) -> str:
+        return _validate_id(value)
+
+
+class QueryApproveInput(StrictDto):
+    operation_id: StrictStr
+    public_query: StrictStr
+
+    @field_validator("operation_id")
+    @classmethod
+    def valid_operation_id(cls, value: str) -> str:
+        return _validate_uuid4(value)
+
+    @field_validator("public_query")
+    @classmethod
+    def non_empty_query(cls, value: str) -> str:
+        if not value:
+            raise ValueError("public_query must be non-empty")
+        return value
+
+
+class QueryRevokeInput(StrictDto):
+    operation_id: StrictStr
+
+    @field_validator("operation_id")
+    @classmethod
+    def valid_operation_id(cls, value: str) -> str:
+        return _validate_uuid4(value)
+
+
+class QueryApprovalOutput(StrictDto):
+    approval: QueryApproval
+
+
+class SearchExecutionRecord(StrictDto):
+    schema_id: Literal["octop.enterprise.knowledge.v1"] = "octop.enterprise.knowledge.v1"
+    version: StrictInt = 1
+    operation_id: StrictStr
+    revision: Annotated[StrictInt, Field(ge=1)]
+    approval_id: StrictStr
+    user_id: Annotated[StrictInt, Field(gt=0)]
+    agent_id: StrictStr
+    thread_id: StrictStr
+    session_revision: Annotated[StrictInt, Field(ge=0)]
+    config_revision: Annotated[StrictInt, Field(ge=0)]
+    binding_revision: Annotated[StrictInt, Field(ge=0)]
+    grant_revision: Annotated[StrictInt, Field(ge=0)]
+    search_revision: Annotated[StrictInt, Field(ge=1)]
+    query_digest: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+    primary_provider: Literal["SEARXNG"] = "SEARXNG"
+    secondary_provider: Literal["FIRECRAWL"] = "FIRECRAWL"
+    state: Literal[
+        "PRIMARY_RESERVED",
+        "SECONDARY_RESERVED",
+        "COMPLETED",
+        "EMPTY",
+        "FAILED",
+        "CANCELLED",
+        "INTERRUPTED",
+        "UNKNOWN",
+    ]
+    attempt_count: Annotated[StrictInt, Field(ge=1, le=2)]
+    active_role: Literal["PRIMARY", "SECONDARY"] | None = None
+    claim_token: StrictStr
+    owner_boot_token: StrictStr
+    result_provider: Literal["SEARXNG", "FIRECRAWL"] | None = None
+    error_code: StrictStr | None = None
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def validate_version(cls, value: object) -> int:
+        return _version(value)
+
+    @field_validator("operation_id", "approval_id", "claim_token", "owner_boot_token")
     @classmethod
     def valid_uuid(cls, value: str) -> str:
         return _validate_uuid4(value)
@@ -672,6 +759,9 @@ class EvidenceRecord(StrictDto):
     agent_id: StrictStr
     thread_id: StrictStr
     source_kind: Literal["KNOWLEDGE", "WEB"]
+    provider: Literal["WEKNORA", "SEARXNG", "FIRECRAWL"] | None = None
+    degraded: StrictBool = False
+    search_revision: Annotated[StrictInt, Field(ge=0)] = 0
     connection_id: StrictStr | None = None
     kb_id: StrictStr | None = None
     knowledge_id: StrictStr | None = None
@@ -717,12 +807,27 @@ class EvidenceRecord(StrictDto):
 
     @model_validator(mode="after")
     def require_knowledge_source_ids(self) -> Self:
-        if self.source_kind == "KNOWLEDGE" and not all(
-            (self.connection_id, self.kb_id, self.knowledge_id)
+        if self.source_kind == "KNOWLEDGE":
+            if not all((self.connection_id, self.kb_id, self.knowledge_id)):
+                raise ValueError(
+                    "knowledge evidence requires connection_id, kb_id, and knowledge_id"
+                )
+            if (
+                self.provider != "WEKNORA"
+                or self.search_revision != 0
+                or self.degraded
+                or self.locator is not None
+            ):
+                raise ValueError("knowledge evidence has invalid source metadata")
+        elif (
+            self.provider not in {"SEARXNG", "FIRECRAWL"}
+            or self.search_revision < 1
+            or self.connection_id is not None
+            or self.kb_id is not None
+            or self.knowledge_id is not None
+            or self.locator is None
         ):
-            raise ValueError("knowledge evidence requires connection_id, kb_id, and knowledge_id")
-        if self.source_kind == "WEB" and self.connection_id is not None:
-            raise ValueError("web evidence cannot claim a knowledge connection")
+            raise ValueError("web evidence has invalid source metadata")
         return self
 
 
@@ -769,6 +874,8 @@ class EvidenceListOutput(StrictDto):
     version: StrictInt = 1
     operation: OperationRecord
     evidence: list[EvidenceRecord]
+    knowledge_evidence: list[EvidenceRecord] = Field(default_factory=list)
+    web_evidence: list[EvidenceRecord] = Field(default_factory=list)
 
     @field_validator("version", mode="before")
     @classmethod
@@ -867,9 +974,10 @@ class OriginalOutput(StrictDto):
     version: StrictInt = 1
     operation_id: StrictStr
     evidence_id: StrictStr
-    available: Literal[False] = False
-    reason: Literal["CAPABILITY_UNVERIFIED"] = "CAPABILITY_UNVERIFIED"
+    available: StrictBool = False
+    reason: Literal["CAPABILITY_UNVERIFIED"] | None = "CAPABILITY_UNVERIFIED"
     resource_token: None = None
+    locator: StrictStr | None = None
 
     @field_validator("version", mode="before")
     @classmethod

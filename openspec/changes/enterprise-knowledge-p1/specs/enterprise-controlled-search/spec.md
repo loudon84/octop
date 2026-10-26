@@ -14,14 +14,14 @@ KB_ONLY MUST be the default and make zero web requests. WEB_ONLY MUST make zero 
 - **THEN** no knowledge source readiness check or request is made
 
 ### Requirement: Exact public query approval
-Web requests MUST use the exact server-stored user-approved public_query, without trim, rewriting or enrichment. Approval MUST be bound to user/thread/expert/operation/revisions and consumed once. Internal evidence, history, attachments and customer identifiers MUST NOT be added to provider input.
+Web requests MUST use the exact user-approved public_query held only in memory for the current operation, without trim, rewriting or enrichment. Persistent records MUST contain only its digest plus approval, claim, consumption, and request-count state. Approval MUST be bound to user/thread/expert/operation and session/search/configuration revisions, and its consumption MUST be atomic with the first durable request reservation. Restart MUST make the plaintext unavailable and MUST NOT revive or replay the approval. Internal evidence, history, attachments and customer identifiers MUST NOT be added to provider input.
 
 #### Scenario: Query changed by one space
 - **WHEN** the pending query changes after approval, including a whitespace-only change
 - **THEN** the old approval is invalid and web search remains blocked pending fresh confirmation
 
 ### Requirement: Bounded primary-secondary fallback
-Each source MUST have a 10-second deadline and the operation a 22-second deadline. Only timeout, HTTP 429 and 5xx may trigger one secondary attempt. Authentication denial, EMPTY and invalid schema MUST NOT trigger fallback. A single operation MUST start at most two requests across repeated or concurrent calls.
+Each source MUST have a 10-second deadline and the operation a 22-second deadline, including authorization, TLS/client construction, body parsing and result validation. Only timeout, HTTP 429 and 5xx may trigger one secondary attempt. Authentication denial, EMPTY, cancellation, permission denial, protocol failure and invalid schema MUST NOT trigger fallback. A single operation MUST durably reserve and start at most two requests across repeated or concurrent calls. Cleanup remains owned and drainable, but an unbounded client/TLS/parser drain MUST NOT delay fallback or reset either deadline.
 
 #### Scenario: Primary unauthorized
 - **WHEN** the primary source returns 401 or 403

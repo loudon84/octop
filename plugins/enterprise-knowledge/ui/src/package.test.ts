@@ -52,9 +52,13 @@ describe("standalone plugin UI package", () => {
       "settings",
       expect.any(Function),
     );
+    expect(host.registerSurface).toHaveBeenCalledWith(
+      "composer",
+      expect.any(Function),
+    );
     expect(typeof dispose).toBe("function");
     dispose();
-    expect(disposeSurface).toHaveBeenCalledTimes(1);
+    expect(disposeSurface).toHaveBeenCalledTimes(2);
   });
 
   it("mounts the actual built setup renderer against the mounted action Host", async () => {
@@ -115,6 +119,9 @@ describe("standalone plugin UI package", () => {
                   agent_id: "built-agent",
                   thread_id: "built-thread",
                   source_kind: "WEB",
+                  provider: "SEARXNG",
+                  degraded: false,
+                  search_revision: 1,
                   connection_id: null,
                   kb_id: null,
                   knowledge_id: null,
@@ -124,7 +131,7 @@ describe("standalone plugin UI package", () => {
                   retrieved_at: "2026-01-02T00:00:00Z",
                   source_version: null,
                   source_page: null,
-                  locator: null,
+                  locator: "https://example.com/built-esm",
                 },
               ],
             },

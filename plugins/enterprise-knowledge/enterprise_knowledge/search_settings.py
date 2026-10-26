@@ -10,7 +10,15 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 import httpx
-from pydantic import Field, SecretStr, StrictBool, StrictInt, StrictStr, model_validator
+from pydantic import (
+    Field,
+    RootModel,
+    SecretStr,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 
 from octop.infra.agents.plugins.host_contracts import (
     CredentialActivation,
@@ -39,10 +47,20 @@ CONFIG_KEY = "default"
 ORIGIN_RELATION: Literal["UNKNOWN"] = "UNKNOWN"
 type SearchRole = Literal["PRIMARY", "SECONDARY"]
 type CredentialOp = Literal["KEEP", "REPLACE", "CLEAR"]
+type CaOp = Literal["KEEP", "REPLACE", "CLEAR"]
 _ROLE_PROVIDER: dict[SearchRole, Literal["SEARXNG", "FIRECRAWL"]] = {
     "PRIMARY": "SEARXNG",
     "SECONDARY": "FIRECRAWL",
 }
+_EMPLOYEE_GET_KEYS = frozenset(
+    {
+        "revision",
+        "recovery_blocked",
+        "primary_ready",
+        "secondary_ready",
+        "web_search_ready",
+    }
+)
 
 
 def _error(actor: PluginActor, code: str, status: int) -> PluginActionError:
@@ -93,15 +111,30 @@ class SearchSettingsOutput(StrictDto):
     diagnostics: tuple[SearchDiagnosticView, ...] = ()
 
 
+class SearchSettingsEmployeeOutput(StrictDto):
+    """Authenticated non-admin search.get projection — readiness summary only."""
+
+    revision: StrictInt
+    recovery_blocked: StrictBool
+    primary_ready: StrictBool
+    secondary_ready: StrictBool
+    web_search_ready: StrictBool
+
+
+class SearchSettingsGetOutput(RootModel[SearchSettingsOutput | SearchSettingsEmployeeOutput]):
+    """search.get action output — admin full view or employee whitelist."""
+
+
 class SearchSourceSavePart(StrictDto):
     base_url: StrictStr
+    ca_op: CaOp = "KEEP"
     ca_bundle: StrictStr | None = None
     credential_op: CredentialOp = "KEEP"
     credential: SecretStr | None = Field(default=None, repr=False)
     reported_version: StrictStr | None = None
 
     @model_validator(mode="after")
-    def _credential_rules(self) -> SearchSourceSavePart:
+    def _credential_and_ca_rules(self) -> SearchSourceSavePart:
         secret = self.credential.get_secret_value() if self.credential is not None else None
         if self.credential_op == "REPLACE" and (
             secret is None
@@ -113,6 +146,11 @@ class SearchSourceSavePart(StrictDto):
             raise ValueError("REPLACE requires a non-empty credential")
         if self.credential_op != "REPLACE" and self.credential is not None:
             raise ValueError("credential is only allowed with REPLACE")
+        if self.ca_op == "REPLACE":
+            if self.ca_bundle is None or not self.ca_bundle:
+                raise ValueError("REPLACE requires a non-empty ca_bundle")
+        elif self.ca_bundle is not None:
+            raise ValueError("ca_bundle is only allowed with REPLACE")
         return self
 
 
@@ -155,7 +193,9 @@ class SearchSettingsService:
         self._facade = facade
         self._transport = transport
 
-    async def get_settings(self, actor: PluginActor) -> SearchSettingsOutput:
+    async def get_settings(
+        self, actor: PluginActor
+    ) -> SearchSettingsOutput | SearchSettingsEmployeeOutput:
         sources = await self._facade.get_record(SEARCH_SOURCES, CONFIG_KEY)
         intent = await self._facade.get_record(SEARCH_INTENTS, CONFIG_KEY)
         blocked = intent is not None and intent.payload.get("state") in {"PREPARING", "BLOCKED"}
@@ -165,7 +205,8 @@ class SearchSettingsService:
                 record = await self._facade.get_record(SEARCH_DIAGNOSTICS, role)
                 if record is not None:
                     diagnostics.append(self._diagnostic_view(record.payload, sources))
-        return self._project(sources, blocked=blocked, diagnostics=tuple(diagnostics))
+            return self._project(sources, blocked=blocked, diagnostics=tuple(diagnostics))
+        return self._project_employee(sources, blocked=blocked)
 
     async def save(self, actor: PluginActor, request: SearchSaveInput) -> SearchSettingsOutput:
         actor = await self._fresh_admin(actor)
@@ -454,7 +495,17 @@ class SearchSettingsService:
         except PluginHostError as exc:
             raise _host_error(exc, actor) from None
 
-        settings = await self.get_settings(actor)
+        sources_after = await self._facade.get_record(SEARCH_SOURCES, CONFIG_KEY)
+        intent = await self._facade.get_record(SEARCH_INTENTS, CONFIG_KEY)
+        blocked = intent is not None and intent.payload.get("state") in {"PREPARING", "BLOCKED"}
+        diagnostics: list[SearchDiagnosticView] = []
+        for diag_role in ("PRIMARY", "SECONDARY"):
+            record = await self._facade.get_record(SEARCH_DIAGNOSTICS, diag_role)
+            if record is not None:
+                diagnostics.append(self._diagnostic_view(record.payload, sources_after))
+        settings = self._project(
+            sources_after, blocked=blocked, diagnostics=tuple(diagnostics)
+        )
         return SearchTestOutput(settings=settings, diagnostic=diagnostic)
 
     async def _fresh_admin(self, actor: PluginActor) -> PluginActor:
@@ -475,6 +526,17 @@ class SearchSettingsService:
         if actual != expected:
             raise _error(actor, "CONFIG_CONFLICT", 409)
 
+    @staticmethod
+    def _resolve_ca_bundle(
+        part: SearchSourceSavePart, old_part: Mapping[str, Any] | None
+    ) -> str | None:
+        if part.ca_op == "KEEP":
+            previous = (old_part or {}).get("ca_bundle")
+            return previous if isinstance(previous, str) else None
+        if part.ca_op == "CLEAR":
+            return None
+        return part.ca_bundle
+
     def _build_source_payload(
         self,
         actor: PluginActor,
@@ -490,10 +552,11 @@ class SearchSettingsService:
             base_url = normalize_search_base_url(provider, part.base_url)
         except SearchHttpError:
             raise _error(actor, "CONFIG_INVALID", 400) from None
+        old_primary = cast(dict[str, Any], (old_root or {}).get("primary") or {})
         return {
             "provider": provider,
             "base_url": base_url,
-            "ca_bundle": part.ca_bundle,
+            "ca_bundle": self._resolve_ca_bundle(part, old_primary),
             "reported_version": part.reported_version,
             "credential_ref": None,
         }
@@ -512,7 +575,7 @@ class SearchSettingsService:
         payload: dict[str, Any] = {
             "provider": "FIRECRAWL",
             "base_url": base_url,
-            "ca_bundle": part.ca_bundle,
+            "ca_bundle": self._resolve_ca_bundle(part, old_secondary),
             "reported_version": part.reported_version,
             "credential_ref": old_secondary.get("credential_ref"),
             "credential_owner_user_id": old_secondary.get("credential_owner_user_id"),
@@ -653,6 +716,18 @@ class SearchSettingsService:
             secondary_ready=secondary_ready,
             web_search_ready=primary_ready and secondary_ready,
             diagnostics=diagnostics,
+        )
+
+    def _project_employee(
+        self, sources: Any | None, *, blocked: bool
+    ) -> SearchSettingsEmployeeOutput:
+        admin = self._project(sources, blocked=blocked, diagnostics=())
+        return SearchSettingsEmployeeOutput(
+            revision=admin.revision,
+            recovery_blocked=admin.recovery_blocked,
+            primary_ready=admin.primary_ready,
+            secondary_ready=admin.secondary_ready,
+            web_search_ready=admin.web_search_ready,
         )
 
     def _project_candidate(

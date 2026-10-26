@@ -232,6 +232,7 @@ async def test_authenticated_evidence_read_uses_scoped_source_and_opaque_cursor(
         "agent_id": agent_id,
         "thread_id": thread_id,
         "source_kind": "KNOWLEDGE",
+        "provider": "WEKNORA",
         "connection_id": connection_id,
         "kb_id": "kb-a",
         "knowledge_id": "doc-a",
@@ -941,6 +942,7 @@ async def test_authenticated_evidence_read_uses_scoped_source_and_opaque_cursor(
         "available": False,
         "reason": "CAPABILITY_UNVERIFIED",
         "resource_token": None,
+        "locator": None,
     }
     assert len(calls) == calls_before_original
 

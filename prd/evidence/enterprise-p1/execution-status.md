@@ -1,5 +1,38 @@
 # 执行状态与本地验证
 
+## 2026-10-26 Next-stage N00–N08（本地 M1/M2/M3）
+
+执行者：Cursor Composer（非 GPT-6 Luna）。起点 HEAD `6dcdb896`；功能改动尚未 commit。
+
+| 波次 | 结果 |
+|---|---|
+| N00–N02b / M1 | 基线 + CA/员工投影 + SearchSettings 诊断/恢复 |
+| N03 / M2 | Composer KB_ONLY + preparation → `operation_id` |
+| N04a–c | `search-operation-contract.md` READY；`search_operations.py` / `search.py`；154 搜索定向 |
+| N05a–b | `query.approve/revoke`；WEB evidence；真实图三模式 |
+| N06a–b | 三模式 UI + PublicQueryDialog + 发送快照；未改核心 Host |
+| N07 | 证据再授权 + 取消/重启/停用收尾 |
+| N08 | `next-stage-acceptance.md`；插件 UI **134**；integration **44**；`make all` **5710 passed / 236 skipped** exit 0 |
+
+OpenSpec 大项：**不**整项勾满。私库不计完成。远端供应商人工待验。
+
+---
+
+## 2026-10-26 Next-stage Wave1 M1（N00–N02b）
+
+执行者：Cursor Composer（非 GPT-6 Luna）。工作目录：enterprise-p1 worktree @ `6dcdb896` 起编。
+
+| 子项 | 结果 |
+|---|---|
+| N00 | `next-stage-baseline.md`；定向 136→本批后 **138** passed（含 CA/员工白名单） |
+| N01 | `search-settings-contract.md` 增补员工白名单、CA KEEP/REPLACE/CLEAR、三态区分、composer Host 类型子集 |
+| N02a-1 | `search_settings.py` / actions：员工 `SearchSettingsEmployeeOutput`；CA `ca_op`；真实 `invoke_action` 白名单负例 |
+| N02a-2 / N02b | `SearchSettings.tsx` + `searchApi.ts`；接入 `Settings.tsx`；单源诊断确认词、recovery、迟到诊断丢弃 |
+| 插件 UI | typecheck/test/build PASS；**125** UI tests |
+| OpenSpec | **不**勾选主 5.3 / UI 2.4 整项（缺真实供应商诊断与完整 Windows 实机证据） |
+
+---
+
 ## 2026-10-26 R0–R2 搜索设置后端
 
 开发恢复范围仅限 R0–R2（P10a 验收、P10b1 合同冻结、`pre_send`、`search.get/save/test/recover`）。未推送、未跑 live、未实施 R3 编排/R4 UI/R5 三模式。

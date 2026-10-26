@@ -270,6 +270,7 @@ def test_knowledge_evidence_requires_real_source_ids_and_utc_time() -> None:
         "agent_id": "agent-1",
         "thread_id": "thread-1",
         "source_kind": "KNOWLEDGE",
+        "provider": "WEKNORA",
         "connection_id": "00000000-0000-4000-8000-000000000003",
         "kb_id": "kb-1",
         "knowledge_id": "doc-1",
@@ -284,3 +285,19 @@ def test_knowledge_evidence_requires_real_source_ids_and_utc_time() -> None:
         )
     with pytest.raises(ValidationError):
         EvidenceRecord.model_validate({**evidence, "retrieved_at": "2026-10-25T08:00:00+08:00"})
+    with pytest.raises(ValidationError):
+        EvidenceRecord.model_validate({**evidence, "provider": "SEARXNG"})
+
+    web = {
+        **evidence,
+        "source_kind": "WEB",
+        "provider": "SEARXNG",
+        "search_revision": 3,
+        "connection_id": None,
+        "kb_id": None,
+        "knowledge_id": None,
+        "locator": "https://result.example/source",
+    }
+    assert EvidenceRecord.model_validate(web).provider == "SEARXNG"
+    with pytest.raises(ValidationError):
+        EvidenceRecord.model_validate({**web, "kb_id": "forged-kb"})

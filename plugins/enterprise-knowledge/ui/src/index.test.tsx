@@ -39,6 +39,9 @@ function registerSettingsSurface() {
         location: "expert";
       }) => unknown)
     | undefined;
+  let composer:
+    | ((props: { host: PluginHost; context: PluginSurfaceContext }) => unknown)
+    | undefined;
   let renderer: ((props: PluginToolProps) => unknown) | undefined;
   const registrationRequest = vi.fn(async () => {
     throw new Error("registration host request must not be used");
@@ -46,8 +49,9 @@ function registerSettingsSurface() {
   const registrationHost: PluginSetupHost = {
     getContext: () => null,
     request: registrationRequest,
-    registerSurface: (_name, component) => {
-      surface = component;
+    registerSurface: (name, component) => {
+      if (name === "settings") surface = component;
+      if (name === "composer") composer = component;
       return () => undefined;
     },
     registerRenderer: (registration) => {
@@ -56,6 +60,7 @@ function registerSettingsSurface() {
   };
   setup(registrationHost);
   expect(surface).toBeDefined();
+  expect(composer).toBeDefined();
   expect(renderer).toBeDefined();
   return { surface: surface!, renderer: renderer!, registrationRequest };
 }
@@ -260,6 +265,9 @@ it("mounts the registered renderer from setup and lists evidence through its mou
                 agent_id: context.agentId,
                 thread_id: context.threadId,
                 source_kind: "WEB",
+                provider: "SEARXNG",
+                degraded: false,
+                search_revision: 1,
                 connection_id: null,
                 kb_id: null,
                 knowledge_id: null,
@@ -269,7 +277,7 @@ it("mounts the registered renderer from setup and lists evidence through its mou
                 retrieved_at: "2026-01-02T00:00:00Z",
                 source_version: null,
                 source_page: null,
-                locator: null,
+                locator: "https://result.example/setup",
               },
             ],
           },

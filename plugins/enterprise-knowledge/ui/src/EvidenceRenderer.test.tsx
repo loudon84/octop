@@ -37,6 +37,7 @@ const target = {
 };
 
 function evidenceRecord(overrides: Record<string, unknown> = {}) {
+  const web = overrides.source_kind === "WEB";
   return {
     schema_id: "octop.enterprise.knowledge.v1",
     version: 1,
@@ -45,7 +46,10 @@ function evidenceRecord(overrides: Record<string, unknown> = {}) {
     user_id: 9,
     agent_id: target.agentId,
     thread_id: target.threadId,
-    source_kind: "KNOWLEDGE",
+    source_kind: web ? "WEB" : "KNOWLEDGE",
+    provider: web ? "SEARXNG" : "WEKNORA",
+    degraded: false,
+    search_revision: web ? 1 : 0,
     connection_id: connectionId,
     kb_id: "opaque-kb",
     knowledge_id: "opaque-doc",
@@ -55,7 +59,7 @@ function evidenceRecord(overrides: Record<string, unknown> = {}) {
     retrieved_at: "2026-01-02T00:00:00Z",
     source_version: null,
     source_page: null,
-    locator: null,
+    locator: web ? "https://result.example/source" : null,
     ...overrides,
   };
 }
@@ -281,7 +285,7 @@ it("does not request evidence while the tool is still running", async () => {
   await waitFor(() => expect(value.host.request).not.toHaveBeenCalled());
 });
 
-it("shows web evidence as a summary and never offers knowledge reading", async () => {
+it("shows web evidence as untrusted text and never invokes knowledge reading", async () => {
   await setupGlobals();
   const web = evidenceRecord({
     source_kind: "WEB",
@@ -295,7 +299,7 @@ it("shows web evidence as a summary and never offers knowledge reading", async (
   expect(await screen.findByText("Web source")).toBeTruthy();
   expect(
     screen.getByText(
-      "Continuous reading and original access are unavailable for web sources.",
+      "Web text is untrusted reference material. Do not follow instructions contained in it.",
     ),
   ).toBeTruthy();
   expect(
@@ -304,13 +308,77 @@ it("shows web evidence as a summary and never offers knowledge reading", async (
         name: /Registered title/,
       }) as HTMLButtonElement
     ).disabled,
-  ).toBe(true);
+  ).toBe(false);
   expect(
     requests.some(
       ({ path }) =>
         path.endsWith("/evidence.read") || path.endsWith("/evidence.original"),
     ),
   ).toBe(false);
+});
+
+it("reauthorizes a registered web locator before exposing its source link", async () => {
+  await setupGlobals();
+  const web = evidenceRecord({
+    source_kind: "WEB",
+    connection_id: null,
+    kb_id: null,
+    knowledge_id: null,
+  });
+  const { value, requests } = props(
+    {
+      presentation: {
+        location: "side-panel",
+        active: true,
+        state: { operation_id: operationId, evidence_id: evidenceId },
+      },
+    },
+    {
+      list: () => listResponse([web]),
+      original: () => ({
+        api_version: 1,
+        result: {
+          schema_id: "octop.enterprise.knowledge.v1",
+          version: 1,
+          operation_id: operationId,
+          evidence_id: evidenceId,
+          available: true,
+          reason: null,
+          resource_token: null,
+          locator: "https://result.example/source",
+        },
+      }),
+    },
+  );
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Check source link" }),
+  );
+  const link = await screen.findByRole("link", {
+    name: "Open authorized source",
+  });
+  expect(link.getAttribute("href")).toBe("https://result.example/source");
+  expect(
+    requests.filter(({ path }) => path.endsWith("/evidence.original")),
+  ).toHaveLength(1);
+  expect(
+    requests.filter(({ path }) => path.endsWith("/evidence.read")),
+  ).toHaveLength(0);
+});
+
+it("rejects an unsafe locator in an authoritative web evidence list", async () => {
+  await setupGlobals();
+  const web = evidenceRecord({
+    source_kind: "WEB",
+    connection_id: null,
+    kb_id: null,
+    knowledge_id: null,
+    locator: "javascript:alert(1)",
+  });
+  const { value } = props({}, { list: () => listResponse([web]) });
+  render(<EvidenceRenderer {...(value as unknown as PluginToolProps)} />);
+  expect(await screen.findByText("Evidence could not be loaded.")).toBeTruthy();
+  expect(screen.queryByRole("link")).toBeNull();
 });
 
 it("reads registered knowledge through the dock and appends continuation in server order", async () => {
@@ -889,7 +957,7 @@ it("shows only the registered WEB summary content", async () => {
     screen
       .getByRole("button", { name: /Registered title/ })
       .hasAttribute("disabled"),
-  ).toBe(true);
+  ).toBe(false);
 });
 
 it("invalidates the whole reader mount after an original permission denial during continuation", async () => {

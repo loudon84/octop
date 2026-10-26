@@ -7,6 +7,9 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
+from uuid import UUID
+
+import httpx
 
 from octop.infra.agents.plugins.host_contracts import (
     HostRecord,
@@ -39,6 +42,8 @@ from .models import (
 from .operations import OPERATIONS, TERMINAL, OperationService
 from .policy import ScopePolicy, apply_requested_ids
 from .reading import ReadingService
+from .search import SearchService
+from .search_settings import CONFIG_KEY, SEARCH_INTENTS, SEARCH_SOURCES
 from .sessions import SESSIONS, SessionService, _session_key
 from .weknora import OperationBudget, SearchHit, WeKnoraError, WeKnoraProvider
 
@@ -63,6 +68,7 @@ class KnowledgeService:
         *,
         provider_factory: Callable[..., Any] = WeKnoraProvider,
         tool_functions: Mapping[str, Callable[..., Any]] | None = None,
+        search_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._facade = facade
         self._provider_factory = provider_factory
@@ -70,18 +76,25 @@ class KnowledgeService:
         self._operations = OperationService(facade)
         self._evidence = EvidenceService(facade)
         self._sessions = SessionService(facade)
+        self._search = SearchService(facade, transport=search_transport)
 
     async def prepare(self, actor: PluginActor, request: OperationPrepareInput) -> OperationOutput:
         session = await self._sessions.get(actor)
         if session.revision != request.expected_session_revision:
             raise _fail(actor, "CONFIG_CONFLICT")
+        if session.invalid:
+            raise _fail(actor, "MODE_NOT_ALLOWED")
+        if session.mode == "WEB_ONLY":
+            if not session.capabilities.web_ready:
+                raise _fail(actor, "MODE_NOT_ALLOWED")
+            return OperationOutput(operation=await self._operations.create(actor, session))
         binding, connection, grant, checked_session = await ScopePolicy(self._facade)._current(
             actor
         )
         self._assert_local_session(actor, binding, connection, grant, checked_session)
         if (
             checked_session.revision != request.expected_session_revision
-            or checked_session.mode != "KB_ONLY"
+            or checked_session.mode not in {"KB_ONLY", "HYBRID"}
             or checked_session.invalid
             or not checked_session.selected_kb_ids
         ):
@@ -96,28 +109,113 @@ class KnowledgeService:
         self, actor: PluginActor, request: EvidenceListInput
     ) -> EvidenceListOutput:
         operation = await self._owned_operation(actor, request.operation_id)
-        binding, connection, grant, session = await ScopePolicy(self._facade)._current(actor)
-        self._assert_pinned(actor, operation, binding, connection, grant, session)
-        intent_revision = await self._assert_intent(actor, connection.logical_key)
         evidence = await self._evidence.list_for_operation(actor, request.operation_id)
-        allowed = ScopePolicy._local_scope(binding.payload, connection, grant, actor)
-        if any(
-            item.kb_id not in allowed or item.kb_id not in session.selected_kb_ids
-            for item in evidence
-        ):
-            raise _fail(actor, "SCOPE_INVALID", 403)
-        await self._check_commit(
-            actor, operation, session, binding, connection, grant, intent_revision
+        knowledge = [item for item in evidence if item.source_kind == "KNOWLEDGE"]
+        web = [item for item in evidence if item.source_kind == "WEB"]
+        mode = operation.payload.get("mode", "KB_ONLY")
+        if mode in {"KB_ONLY", "HYBRID"}:
+            binding, connection, grant, session = await ScopePolicy(self._facade)._current(actor)
+            self._assert_pinned(actor, operation, binding, connection, grant, session)
+            intent_revision = await self._assert_intent(actor, connection.logical_key)
+            allowed = ScopePolicy._local_scope(binding.payload, connection, grant, actor)
+            if any(
+                item.kb_id not in allowed or item.kb_id not in session.selected_kb_ids
+                for item in knowledge
+            ):
+                raise _fail(actor, "SCOPE_INVALID", 403)
+            await self._check_commit(
+                actor, operation, session, binding, connection, grant, intent_revision
+            )
+        if mode in {"WEB_ONLY", "HYBRID"}:
+            if web:
+                await self._authorize_web_evidence(actor, operation, web)
+            else:
+                await self._authorize_web_operation(actor, operation)
+                try:
+                    await self._facade.commit((), checks=await self._web_checks(actor, operation))
+                except PluginHostError as exc:
+                    if exc.code == "conflict":
+                        raise _fail(actor, "READ_SOURCE_CHANGED") from None
+                    raise
+        return EvidenceListOutput(
+            operation=self._operation_dto(operation),
+            evidence=evidence,
+            knowledge_evidence=knowledge,
+            web_evidence=web,
         )
-        return EvidenceListOutput(operation=self._operation_dto(operation), evidence=evidence)
 
     async def read(self, actor: PluginActor, request: ReadInput) -> ReadPage:
+        operation = await self._owned_operation(actor, request.operation_id)
+        evidence = await self._evidence.get(actor, request.operation_id, request.evidence_id)
+        if evidence.source_kind == "WEB":
+            if request.continuation is not None:
+                raise _fail(actor, "READ_CURSOR_INVALID", 400)
+            await self._authorize_web_evidence(actor, operation, [evidence])
+            return ReadPage(
+                operation_id=request.operation_id,
+                evidence_id=request.evidence_id,
+                knowledge_id=request.evidence_id,
+                status="SUCCESS",
+                content=evidence.content,
+                truncated=False,
+            )
         return await ReadingService(self._facade).read(actor, request)
 
     async def original(self, actor: PluginActor, request: OriginalInput) -> OriginalOutput:
+        operation = await self._owned_operation(actor, request.operation_id)
+        evidence = await self._evidence.get(actor, request.operation_id, request.evidence_id)
+        if evidence.source_kind == "WEB":
+            await self._authorize_web_evidence(actor, operation, [evidence])
+            if evidence.locator is None:
+                raise _fail(actor, "EVIDENCE_SOURCE_INVALID", 403)
+            return OriginalOutput(
+                operation_id=request.operation_id,
+                evidence_id=request.evidence_id,
+                available=True,
+                reason=None,
+                locator=evidence.locator,
+            )
         return await ReadingService(self._facade).original(actor, request)
 
     async def retrieve_current(self, question: str) -> RetrievalOutput:
+        _execution, actor, operation_id = await self._current_operation()
+        operation = await self._owned_operation(actor, operation_id)
+        mode = operation.payload.get("mode", "KB_ONLY")
+        if mode == "WEB_ONLY":
+            return await self._retrieve_web_current(actor, operation)
+        if mode == "HYBRID":
+            internal = await self._retrieve_knowledge_current(question)
+            approval = await self._operations.approved_query(actor, operation_id)
+            if internal.operation.status not in {"GENERATING", "RETRIEVING"} or approval is None:
+                return internal
+            web = await self._run_web(
+                actor, await self._owned_operation(actor, operation_id), approval
+            )
+            if web is None:
+                return internal
+            current = await self._owned_operation(actor, operation_id)
+            if internal.operation.status == "RETRIEVING":
+                saved = await self._facade.commit(
+                    (
+                        RecordWrite(
+                            OPERATIONS,
+                            operation_id,
+                            current.owner_user_id,
+                            {**current.payload, "partial_failure": "KNOWLEDGE_EMPTY"},
+                            current.revision,
+                        ),
+                    ),
+                    checks=await self._web_checks(actor, current),
+                )
+                current = saved[0]
+            evidence = await self._evidence.list_for_operation(actor, operation_id)
+            return RetrievalOutput(
+                operation=self._operation_dto(current),
+                evidence=evidence,
+            )
+        return await self._retrieve_knowledge_current(question)
+
+    async def _retrieve_knowledge_current(self, question: str) -> RetrievalOutput:
         budget = OperationBudget()
         provider: Any | None = None
         actor: PluginActor | None = None
@@ -226,7 +324,12 @@ class KnowledgeService:
                     if hits
                     else []
                 )
-                final_status = "GENERATING" if evidence else "EMPTY"
+                approval = (
+                    await self._operations.approved_query(actor, operation_id)
+                    if current.payload.get("mode") == "HYBRID" and not evidence
+                    else None
+                )
+                final_status = "GENERATING" if evidence else "RETRIEVING" if approval else "EMPTY"
                 new_operation = {
                     **current.payload,
                     "status": final_status,
@@ -271,6 +374,10 @@ class KnowledgeService:
                 return RetrievalOutput(operation=result_operation, evidence=evidence)
         except TimeoutError:
             if actor is not None and claimed_operation is not None:
+                hybrid = await self._recover_hybrid_web(actor, claimed_operation)
+                if hybrid is not None:
+                    return hybrid
+            if actor is not None and claimed_operation is not None:
                 await self._fail_claimed_operation(
                     actor, claimed_operation, "UPSTREAM_BUDGET_EXCEEDED"
                 )
@@ -278,6 +385,10 @@ class KnowledgeService:
                 raise PluginHostError("unavailable") from None
             raise _fail(actor, "UPSTREAM_BUDGET_EXCEEDED", 503) from None
         except WeKnoraError as exc:
+            if actor is not None and claimed_operation is not None:
+                hybrid = await self._recover_hybrid_web(actor, claimed_operation)
+                if hybrid is not None:
+                    return hybrid
             if actor is not None and claimed_operation is not None:
                 await self._fail_claimed_operation(actor, claimed_operation, exc.code)
             raise _fail(actor, exc.code, exc.status) from None
@@ -289,8 +400,136 @@ class KnowledgeService:
             if provider is not None:
                 await provider.aclose()
 
+    async def _retrieve_web_current(
+        self, actor: PluginActor, operation: HostRecord
+    ) -> RetrievalOutput:
+        if operation.payload.get("status") != "VALIDATING":
+            raise _fail(actor, "CONFIG_CONFLICT")
+        approval = await self._operations.approved_query(actor, operation.logical_key)
+        if approval is None:
+            raise _fail(actor, "ACCESS_DENIED", 403)
+        claimed = await self._operations.transition(
+            actor,
+            operation.logical_key,
+            operation.revision,
+            "RETRIEVING",
+        )
+        current = await self._owned_operation(actor, operation.logical_key)
+        if current.revision != claimed.revision:
+            raise _fail(actor, "CONFIG_CONFLICT")
+        evidence = await self._run_web(actor, current, approval)
+        final = await self._owned_operation(actor, operation.logical_key)
+        return RetrievalOutput(operation=self._operation_dto(final), evidence=evidence or [])
+
+    async def _run_web(
+        self,
+        actor: PluginActor,
+        operation: HostRecord,
+        approval: tuple[str, str],
+    ) -> list[Any] | None:
+        approval_id, public_query = approval
+        run = await self._search.execute(
+            actor,
+            operation.logical_key,
+            approval_id,
+            public_query,
+        )
+        mode = operation.payload.get("mode", "KB_ONLY")
+        if run.execution.state == "COMPLETED" and run.result is not None:
+            evidence = await self._evidence.record_web_result(
+                actor,
+                operation.logical_key,
+                run.result.hits,
+                degraded=run.execution.attempt_count > 1,
+            )
+            if mode == "WEB_ONLY" or operation.payload.get("status") == "RETRIEVING":
+                current = await self._owned_operation(actor, operation.logical_key)
+                await self._operations.transition(
+                    actor,
+                    operation.logical_key,
+                    current.revision,
+                    "GENERATING",
+                )
+            return evidence
+        if mode == "WEB_ONLY" or operation.payload.get("status") == "RETRIEVING":
+            current = await self._owned_operation(actor, operation.logical_key)
+            if run.execution.state == "EMPTY":
+                await self._operations.transition(
+                    actor, operation.logical_key, current.revision, "EMPTY"
+                )
+            else:
+                await self._operations.transition(
+                    actor,
+                    operation.logical_key,
+                    current.revision,
+                    "FAILED",
+                    error_code=run.execution.error_code or run.execution.state,
+                )
+        elif mode == "HYBRID":
+            current = await self._owned_operation(actor, operation.logical_key)
+            try:
+                await self._facade.commit(
+                    (
+                        RecordWrite(
+                            OPERATIONS,
+                            current.logical_key,
+                            current.owner_user_id,
+                            {
+                                **current.payload,
+                                "partial_failure": (
+                                    f"WEB_{run.execution.error_code or run.execution.state}"
+                                ),
+                            },
+                            current.revision,
+                        ),
+                    ),
+                    checks=await self._web_checks(actor, current),
+                )
+            except PluginHostError as exc:
+                if exc.code == "conflict":
+                    raise _fail(actor, "READ_SOURCE_CHANGED") from None
+                raise
+        return None
+
+    async def _recover_hybrid_web(
+        self, actor: PluginActor, operation: HostRecord
+    ) -> RetrievalOutput | None:
+        if operation.payload.get("mode") != "HYBRID":
+            return None
+        approval = await self._operations.approved_query(actor, operation.logical_key)
+        if approval is None:
+            return None
+        evidence = await self._run_web(actor, operation, approval)
+        current = await self._owned_operation(actor, operation.logical_key)
+        if current.payload.get("status") == "GENERATING":
+            saved = await self._facade.commit(
+                (
+                    RecordWrite(
+                        OPERATIONS,
+                        current.logical_key,
+                        current.owner_user_id,
+                        {**current.payload, "partial_failure": "KNOWLEDGE_FAILED"},
+                        current.revision,
+                    ),
+                ),
+                checks=await self._web_checks(actor, current),
+            )
+            current = saved[0]
+        return RetrievalOutput(operation=self._operation_dto(current), evidence=evidence or [])
+
     async def search_current(self, knowledge_base_ids: list[str] | None = None) -> RetrievalOutput:
         actor, operation = await self._current_generating()
+        mode = operation.payload.get("mode", "KB_ONLY")
+        if mode == "WEB_ONLY":
+            if knowledge_base_ids is not None:
+                raise _fail(actor, "SCOPE_INVALID", 403)
+            evidence = await self._evidence.list_for_operation(
+                actor, operation.payload["operation_id"]
+            )
+            if any(item.source_kind != "WEB" for item in evidence):
+                raise _fail(actor, "EVIDENCE_SOURCE_INVALID", 403)
+            await self._final_current_check(actor, operation)
+            return RetrievalOutput(operation=self._operation_dto(operation), evidence=evidence)
         bases = self._observation(operation)
         local_scope = await self._current_local_scope(actor, operation)
         observed_ids = [item.kb_id for item in bases]
@@ -301,12 +540,17 @@ class KnowledgeService:
         except (PluginActionError, TypeError, ValueError):
             raise _fail(actor, "SCOPE_INVALID", 403) from None
         evidence = await self._evidence.list_for_operation(actor, operation.payload["operation_id"])
-        selected = [item for item in evidence if item.kb_id in effective]
+        selected = [
+            item for item in evidence if item.source_kind == "WEB" or item.kb_id in effective
+        ]
         await self._final_current_check(actor, operation)
         return RetrievalOutput(operation=self._operation_dto(operation), evidence=selected)
 
     async def list_current(self) -> KnowledgeListOutput:
         actor, operation = await self._current_generating()
+        if operation.payload.get("mode", "KB_ONLY") == "WEB_ONLY":
+            await self._final_current_check(actor, operation)
+            return KnowledgeListOutput(operation=self._operation_dto(operation), knowledge_bases=[])
         bases = self._observation(operation)
         local_scope = await self._current_local_scope(actor, operation)
         if not {item.kb_id for item in bases}.issubset(local_scope):
@@ -317,6 +561,18 @@ class KnowledgeService:
     async def read_current(self, evidence_id: str, continuation: str | None = None) -> ReadPage:
         actor, operation = await self._current_generating()
         evidence = await self._evidence.get(actor, operation.payload["operation_id"], evidence_id)
+        if evidence.source_kind == "WEB":
+            if continuation is not None:
+                raise _fail(actor, "READ_CURSOR_INVALID", 400)
+            await self._authorize_web_evidence(actor, operation, [evidence])
+            return ReadPage(
+                operation_id=operation.logical_key,
+                evidence_id=evidence.evidence_id,
+                knowledge_id=evidence.evidence_id,
+                status="SUCCESS",
+                content=evidence.content,
+                truncated=False,
+            )
         observed = {item.kb_id for item in self._observation(operation)}
         local = await self._current_local_scope(actor, operation)
         if evidence.kb_id not in observed or evidence.kb_id not in local:
@@ -354,9 +610,16 @@ class KnowledgeService:
     async def complete_current(self) -> OperationOutput:
         _execution, actor, operation_id = await self._current_operation()
         record = await self._owned_operation(actor, operation_id)
-        binding, connection, grant, session = await ScopePolicy(self._facade)._current(actor)
-        self._assert_pinned(actor, record, binding, connection, grant, session)
-        intent_revision = await self._assert_intent(actor, connection.logical_key)
+        if record.payload.get("mode", "KB_ONLY") == "WEB_ONLY":
+            await self._authorize_web_operation(actor, record)
+            checks = await self._web_checks(actor, record)
+        else:
+            binding, connection, grant, session = await ScopePolicy(self._facade)._current(actor)
+            self._assert_pinned(actor, record, binding, connection, grant, session)
+            intent_revision = await self._assert_intent(actor, connection.logical_key)
+            checks = self._checks(
+                actor, record, session, binding, connection, grant, intent_revision
+            )
         if record.payload.get("status") in TERMINAL:
             return OperationOutput(operation=self._operation_dto(record))
         if record.payload.get("status") != "GENERATING":
@@ -365,9 +628,7 @@ class KnowledgeService:
         try:
             saved = await self._facade.commit(
                 (RecordWrite(OPERATIONS, operation_id, actor.user_id, payload, record.revision),),
-                checks=self._checks(
-                    actor, record, session, binding, connection, grant, intent_revision
-                ),
+                checks=checks,
             )
         except PluginHostError as exc:
             if exc.code == "conflict":
@@ -453,9 +714,12 @@ class KnowledgeService:
         operation = await self._owned_operation(actor, operation_id)
         if operation.payload.get("status") != "GENERATING":
             raise _fail(actor, "CONFIG_CONFLICT")
-        binding, connection, grant, session = await ScopePolicy(self._facade)._current(actor)
-        self._assert_pinned(actor, operation, binding, connection, grant, session)
-        await self._assert_intent(actor, connection.logical_key)
+        if operation.payload.get("mode", "KB_ONLY") == "WEB_ONLY":
+            await self._authorize_web_operation(actor, operation)
+        else:
+            binding, connection, grant, session = await ScopePolicy(self._facade)._current(actor)
+            self._assert_pinned(actor, operation, binding, connection, grant, session)
+            await self._assert_intent(actor, connection.logical_key)
         return actor, operation
 
     async def _current_local_scope(self, actor: PluginActor, operation: HostRecord) -> set[str]:
@@ -466,11 +730,84 @@ class KnowledgeService:
         )
 
     async def _final_current_check(self, actor: PluginActor, operation: HostRecord) -> None:
+        if operation.payload.get("mode", "KB_ONLY") == "WEB_ONLY":
+            await self._authorize_web_operation(actor, operation)
+            try:
+                await self._facade.commit((), checks=await self._web_checks(actor, operation))
+            except PluginHostError as exc:
+                if exc.code == "conflict":
+                    raise _fail(actor, "READ_SOURCE_CHANGED") from None
+                raise
+            return
         binding, connection, grant, session = await ScopePolicy(self._facade)._current(actor)
         self._assert_pinned(actor, operation, binding, connection, grant, session)
         intent_revision = await self._assert_intent(actor, connection.logical_key)
         await self._check_commit(
             actor, operation, session, binding, connection, grant, intent_revision
+        )
+
+    async def _authorize_web_evidence(
+        self,
+        actor: PluginActor,
+        operation: HostRecord,
+        evidence: Sequence[Any],
+    ) -> None:
+        await self._authorize_web_operation(actor, operation)
+        if any(
+            item.source_kind != "WEB"
+            or item.search_revision != operation.payload.get("search_revision")
+            or item.provider not in {"SEARXNG", "FIRECRAWL"}
+            for item in evidence
+        ):
+            raise _fail(actor, "EVIDENCE_SOURCE_INVALID", 403)
+        try:
+            await self._facade.commit((), checks=await self._web_checks(actor, operation))
+        except PluginHostError as exc:
+            if exc.code == "conflict":
+                raise _fail(actor, "READ_SOURCE_CHANGED") from None
+            raise
+
+    async def _authorize_web_operation(self, actor: PluginActor, operation: HostRecord) -> None:
+        try:
+            fresh = await self._facade.reauthorize_actor(actor, "authenticated")
+        except PluginHostError:
+            raise _fail(actor, "ACCESS_DENIED", 403) from None
+        session = await self._sessions.get(fresh)
+        binding = await self._facade.get_record(BINDINGS, actor.agent_id or "")
+        sources = await self._facade.get_record(SEARCH_SOURCES, CONFIG_KEY)
+        intent = await self._facade.get_record(SEARCH_INTENTS, CONFIG_KEY)
+        if (
+            binding is None
+            or binding.revision != operation.payload.get("binding_revision")
+            or binding.payload.get("web_allowed") is not True
+            or sources is None
+            or sources.revision != operation.payload.get("search_revision")
+            or session.revision != operation.payload.get("session_revision")
+            or session.mode not in {"WEB_ONLY", "HYBRID"}
+            or session.invalid
+            or intent is not None
+            and intent.payload.get("state") in {"PREPARING", "BLOCKED"}
+        ):
+            raise _fail(actor, "READ_SOURCE_CHANGED")
+
+    async def _web_checks(
+        self, actor: PluginActor, operation: HostRecord
+    ) -> tuple[RecordCheck, ...]:
+        binding = await self._facade.get_record(BINDINGS, actor.agent_id or "")
+        sources = await self._facade.get_record(SEARCH_SOURCES, CONFIG_KEY)
+        intent = await self._facade.get_record(SEARCH_INTENTS, CONFIG_KEY)
+        if binding is None or sources is None:
+            raise _fail(actor, "READ_SOURCE_CHANGED")
+        return (
+            RecordCheck(OPERATIONS, operation.logical_key, operation.revision),
+            RecordCheck(
+                SESSIONS,
+                _session_key(actor.user_id, actor.agent_id or "", actor.thread_id or ""),
+                int(operation.payload.get("session_revision", 0)),
+            ),
+            RecordCheck(BINDINGS, binding.logical_key, binding.revision),
+            RecordCheck(SEARCH_SOURCES, CONFIG_KEY, sources.revision),
+            RecordCheck(SEARCH_INTENTS, CONFIG_KEY, intent.revision if intent is not None else 0),
         )
 
     async def _owned_operation(self, actor: PluginActor, operation_id: str) -> HostRecord:
@@ -585,8 +922,6 @@ class KnowledgeService:
 
     @staticmethod
     def _is_uuid4(value: str) -> bool:
-        from uuid import UUID
-
         try:
             return str(UUID(value)) == value and UUID(value).version == 4
         except (ValueError, AttributeError):
@@ -596,6 +931,7 @@ class KnowledgeService:
     def _hit_payload(hit: SearchHit, connection_id: str) -> dict[str, Any]:
         return {
             "source_kind": "KNOWLEDGE",
+            "provider": "WEKNORA",
             "connection_id": connection_id,
             "kb_id": hit.knowledge_base_id,
             "knowledge_id": hit.knowledge_id,

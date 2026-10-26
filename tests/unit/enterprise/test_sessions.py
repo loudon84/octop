@@ -211,3 +211,55 @@ def test_session_readiness_uses_three_valid_current_proofs_without_network() -> 
     )
     stale = asyncio.run(SessionService(facade).get(actor))
     assert stale.capabilities.knowledge_ready is False
+
+
+def test_web_only_session_readiness_does_not_require_knowledge_connection() -> None:
+    agent_id = "agent-web"
+    actor = PluginActor(user_id=9, is_admin=False, agent_id=agent_id, thread_id="thread-1")
+    records = {
+        ("bindings", agent_id): HostRecord(
+            id=agent_id,
+            namespace="bindings",
+            logical_key=agent_id,
+            owner_user_id=1,
+            revision=3,
+            payload={"enabled": True, "web_allowed": True},
+        ),
+        ("search_sources", "default"): HostRecord(
+            id="default",
+            namespace="search_sources",
+            logical_key="default",
+            owner_user_id=1,
+            revision=7,
+            payload={
+                "primary": {"provider": "SEARXNG", "base_url": "https://search.example"},
+                "secondary": {"provider": "FIRECRAWL", "base_url": "https://crawl.example"},
+            },
+        ),
+        ("sessions", session_key(9, agent_id, "thread-1")): HostRecord(
+            id="session",
+            namespace="sessions",
+            logical_key=session_key(9, agent_id, "thread-1"),
+            owner_user_id=9,
+            revision=2,
+            payload={
+                "mode": "WEB_ONLY",
+                "selected_kb_ids": [],
+                "binding_revision": 3,
+                "config_revision": 0,
+                "grant_revision": 0,
+                "connection_id": None,
+                "search_revision": 7,
+            },
+        ),
+    }
+
+    snapshot = asyncio.run(SessionService(_RecordsFacade(records)).get(actor))
+
+    assert snapshot.mode == "WEB_ONLY"
+    assert snapshot.invalid is False
+    assert snapshot.search_revision == 7
+    assert snapshot.search_ready is True
+    assert snapshot.capabilities.web_ready is True
+    assert snapshot.capabilities.knowledge_ready is False
+    assert snapshot.weknora_query_count == 0

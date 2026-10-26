@@ -18,6 +18,7 @@ from octop.infra.agents.plugins.host_contracts import (
 from .connections import BINDINGS, CONNECTION_INTENTS, CONNECTIONS, GRANTS, ConnectionService
 from .i18n import error_message
 from .models import SCHEMA_ID, SessionCapabilities, SessionSaveInput, SessionSnapshot
+from .search_settings import CONFIG_KEY, SEARCH_INTENTS, SEARCH_SOURCES
 
 SESSIONS = "sessions"
 
@@ -27,6 +28,12 @@ class SourceRevisions(TypedDict):
     binding_revision: int
     config_revision: int
     grant_revision: int
+
+
+class SearchState(TypedDict):
+    revision: int
+    ready: bool
+    intent_revision: int
 
 
 def _session_key(user_id: int, agent_id: str, thread_id: str) -> str:
@@ -59,6 +66,7 @@ class SessionService:
         agent_id, thread_id = self._scope(actor)
         binding = await self._facade.get_record(BINDINGS, agent_id)
         binding_payload = binding.payload if binding is not None else {}
+        search = await self._search_state(binding_payload)
         connection_id = (
             binding_payload.get("connection_ref") if binding_payload.get("enabled") else None
         )
@@ -73,7 +81,7 @@ class SessionService:
             else None
         )
         allowed = self._authorized_selection(binding_payload, connection, grant)
-        capabilities = await self._capabilities(actor, connection, allowed)
+        capabilities = await self._capabilities(actor, connection, allowed, search["ready"])
         revisions = _source_revisions(binding, connection, grant, connection_id)
         key = _session_key(actor.user_id, agent_id, thread_id)
         saved = await self._facade.get_record(SESSIONS, key)
@@ -96,24 +104,41 @@ class SessionService:
                 selected_kb_ids=selected,
                 mode="KB_ONLY",
                 capabilities=capabilities,
+                search_revision=search["revision"],
+                search_ready=search["ready"],
                 **revisions,
             )
         payload = saved.payload
         saved_revisions = {
             name: payload.get(name, None if name == "connection_id" else 0) for name in revisions
         }
-        changed = saved_revisions != revisions
+        knowledge_changed = saved_revisions != revisions
         selected = list(payload.get("selected_kb_ids", []))
         scope_invalid = any(item not in allowed for item in selected)
         mode = payload.get("mode", "KB_ONLY")
-        invalid = changed or scope_invalid or mode != "KB_ONLY"
+        search_changed = (
+            mode in {"WEB_ONLY", "HYBRID"}
+            and payload.get("search_revision", 0) != search["revision"]
+        )
+        mode_unready = (
+            mode == "WEB_ONLY"
+            and not search["ready"]
+            or mode == "HYBRID"
+            and (not search["ready"] or not capabilities.knowledge_ready or not selected)
+        )
+        invalid = (
+            (knowledge_changed and mode != "WEB_ONLY")
+            or (scope_invalid and mode != "WEB_ONLY")
+            or search_changed
+            or mode_unready
+        )
         reason = (
             "SOURCE_CHANGED"
-            if changed
+            if knowledge_changed or search_changed
             else "SCOPE_REVOKED"
             if scope_invalid
             else "SEARCH_NOT_READY"
-            if mode != "KB_ONLY"
+            if mode_unready
             else None
         )
         capabilities = capabilities.model_copy(
@@ -132,6 +157,8 @@ class SessionService:
             selected_kb_ids=selected,
             mode=mode,
             **revisions,
+            search_revision=search["revision"],
+            search_ready=search["ready"],
             invalid=invalid,
             invalid_reason=reason,
             capabilities=capabilities,
@@ -139,11 +166,10 @@ class SessionService:
 
     async def save(self, actor: PluginActor, request: SessionSaveInput) -> SessionSnapshot:
         agent_id, thread_id = self._scope(actor)
-        if request.mode != "KB_ONLY":
-            raise _error(actor, "MODE_NOT_ALLOWED", 409)
 
         binding = await self._facade.get_record(BINDINGS, agent_id)
         binding_payload: Mapping[str, Any] = binding.payload if binding is not None else {}
+        search = await self._search_state(binding_payload)
         connection_id = (
             binding_payload.get("connection_ref") if binding_payload.get("enabled") else None
         )
@@ -158,11 +184,28 @@ class SessionService:
             else None
         )
         revisions = _source_revisions(binding, connection, grant, connection_id)
-        if request.source_revisions.model_dump() != revisions:
+        requested_sources = request.source_revisions.model_dump()
+        requested_knowledge = {
+            name: requested_sources[name]
+            for name in ("connection_id", "binding_revision", "config_revision", "grant_revision")
+        }
+        if requested_knowledge != revisions:
+            raise _error(actor, "CONFIG_CONFLICT", 409)
+        if (
+            request.mode in {"WEB_ONLY", "HYBRID"}
+            and request.source_revisions.search_revision != search["revision"]
+        ):
             raise _error(actor, "CONFIG_CONFLICT", 409)
         allowed = self._authorized_selection(binding_payload, connection, grant)
         if not set(request.selected_kb_ids).issubset(allowed):
             raise _error(actor, "SCOPE_INVALID", 400)
+        capabilities = await self._capabilities(actor, connection, allowed, search["ready"])
+        if request.mode == "WEB_ONLY" and not search["ready"]:
+            raise _error(actor, "MODE_NOT_ALLOWED", 409)
+        if request.mode == "HYBRID" and (
+            not search["ready"] or not request.selected_kb_ids or not capabilities.knowledge_ready
+        ):
+            raise _error(actor, "MODE_NOT_ALLOWED", 409)
         key = _session_key(actor.user_id, agent_id, thread_id)
         old = await self._facade.get_record(SESSIONS, key)
         current_revision = old.revision if old is not None else 0
@@ -170,18 +213,25 @@ class SessionService:
             raise _error(actor, "CONFIG_CONFLICT", 409)
 
         intent_revision: int | None = None
-        if connection_id is not None:
+        if connection_id is not None and request.mode != "WEB_ONLY":
             intent_revision = await ConnectionService(self._facade).assert_connection_available(
                 connection_id, actor
             )
         source = request.source_revisions
         checks = [RecordCheck(BINDINGS, agent_id, source.binding_revision)]
-        if connection_id is not None:
+        if connection_id is not None and request.mode != "WEB_ONLY":
             checks.extend(
                 (
                     RecordCheck(CONNECTIONS, connection_id, source.config_revision),
                     RecordCheck(GRANTS, f"{connection_id}:{actor.user_id}", source.grant_revision),
                     RecordCheck(CONNECTION_INTENTS, connection_id, intent_revision or 0),
+                )
+            )
+        if request.mode in {"WEB_ONLY", "HYBRID"}:
+            checks.extend(
+                (
+                    RecordCheck(SEARCH_SOURCES, CONFIG_KEY, search["revision"]),
+                    RecordCheck(SEARCH_INTENTS, CONFIG_KEY, search["intent_revision"]),
                 )
             )
         payload = {
@@ -191,8 +241,9 @@ class SessionService:
             "agent_id": agent_id,
             "thread_id": thread_id,
             "selected_kb_ids": list(request.selected_kb_ids),
-            "mode": "KB_ONLY",
+            "mode": request.mode,
             "connection_id": source.connection_id,
+            "search_revision": search["revision"],
             **revisions,
         }
         try:
@@ -204,7 +255,6 @@ class SessionService:
             if exc.code == "conflict":
                 raise _error(actor, "CONFIG_CONFLICT", 409) from None
             raise
-        capabilities = await self._capabilities(actor, connection, allowed)
         capabilities = capabilities.model_copy(
             update={
                 "knowledge_ready": bool(request.selected_kb_ids) and capabilities.knowledge_ready
@@ -216,13 +266,15 @@ class SessionService:
             revision=saved[0].revision,
             selection_present=True,
             selected_kb_ids=list(request.selected_kb_ids),
-            mode="KB_ONLY",
+            mode=request.mode,
             capabilities=capabilities,
+            search_revision=search["revision"],
+            search_ready=search["ready"],
             **revisions,
         )
 
     async def _capabilities(
-        self, actor: PluginActor, connection: Any, allowed: set[str]
+        self, actor: PluginActor, connection: Any, allowed: set[str], web_ready: bool
     ) -> SessionCapabilities:
         isolated = False
         connection_id = connection.logical_key if connection is not None else None
@@ -242,6 +294,7 @@ class SessionService:
             and allowed
             and not isolated
         ):
+            # probes imports policy -> sessions, so this must remain lazy to break that cycle.
             from .probes import PROBES, valid_probe_record
 
             probe_rows = [
@@ -262,8 +315,30 @@ class SessionService:
             can_save_selection=not isolated,
             can_select_knowledge=bool(allowed) and not isolated,
             knowledge_ready=ready,
-            web_ready=False,
+            web_ready=web_ready,
         )
+
+    async def _search_state(self, binding: Mapping[str, Any]) -> SearchState:
+        sources = await self._facade.get_record(SEARCH_SOURCES, CONFIG_KEY)
+        intent = await self._facade.get_record(SEARCH_INTENTS, CONFIG_KEY)
+        blocked = intent is not None and intent.payload.get("state") in {"PREPARING", "BLOCKED"}
+        payload = sources.payload if sources is not None else {}
+        primary = payload.get("primary")
+        secondary = payload.get("secondary")
+        ready = (
+            binding.get("enabled") is True
+            and binding.get("web_allowed") is True
+            and isinstance(primary, Mapping)
+            and isinstance(primary.get("base_url"), str)
+            and isinstance(secondary, Mapping)
+            and isinstance(secondary.get("base_url"), str)
+            and not blocked
+        )
+        return {
+            "revision": sources.revision if sources is not None else 0,
+            "ready": ready,
+            "intent_revision": intent.revision if intent is not None else 0,
+        }
 
     @staticmethod
     def _scope(actor: PluginActor) -> tuple[str, str]:

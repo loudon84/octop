@@ -12,6 +12,7 @@ from .models import EmptyInput
 from .search_settings import (
     SearchRecoverInput,
     SearchSaveInput,
+    SearchSettingsGetOutput,
     SearchSettingsOutput,
     SearchSettingsService,
     SearchTestInput,
@@ -22,8 +23,8 @@ from .search_settings import (
 def register_search_actions(facade: Any) -> tuple[ActionSpec, ...]:
     service = SearchSettingsService(facade)
 
-    async def search_get(actor: PluginActor, _payload: EmptyInput) -> SearchSettingsOutput:
-        return await service.get_settings(actor)
+    async def search_get(actor: PluginActor, _payload: EmptyInput) -> SearchSettingsGetOutput:
+        return SearchSettingsGetOutput(await service.get_settings(actor))
 
     async def search_save(actor: PluginActor, payload: SearchSaveInput) -> SearchSettingsOutput:
         return await service.save(actor, payload)
@@ -40,7 +41,7 @@ def register_search_actions(facade: Any) -> tuple[ActionSpec, ...]:
         ActionSpec(
             "search.get",
             EmptyInput,
-            SearchSettingsOutput,
+            SearchSettingsGetOutput,
             search_get,
             tr("actions.search.get"),
             "authenticated",

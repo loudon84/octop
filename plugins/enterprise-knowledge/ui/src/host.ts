@@ -7,15 +7,6 @@ export interface PluginSurfaceContext {
   timeZone: string;
 }
 
-export interface PluginHost {
-  request<T = unknown>(path: string, init?: RequestInit): Promise<T>;
-  getContext(): PluginSurfaceContext | null;
-  registerSurface(
-    surface: "settings" | "composer",
-    component: (props: any) => unknown,
-  ): () => void;
-}
-
 export type PluginJson =
   | null
   | boolean
@@ -23,6 +14,37 @@ export type PluginJson =
   | string
   | readonly PluginJson[]
   | { readonly [key: string]: PluginJson };
+
+export type PluginJsonObject = { readonly [key: string]: PluginJson };
+
+export type ComposerSelectionCapture =
+  | { readonly state: "uninitialized" }
+  | { readonly state: "selected"; readonly value: PluginJsonObject };
+
+export interface ComposerPreparationHandler {
+  captureSelection(): ComposerSelectionCapture;
+  prepare(input: {
+    readonly selection: ComposerSelectionCapture;
+    readonly target: { readonly agentId: string; readonly threadId: string };
+    readonly text: string;
+    readonly attachments: readonly unknown[];
+    readonly generation: string;
+    readonly signal: AbortSignal;
+  }): Promise<PluginJsonObject>;
+  restoreSelection(selection: ComposerSelectionCapture): Promise<void>;
+}
+
+export interface PluginHost {
+  request<T = unknown>(path: string, init?: RequestInit): Promise<T>;
+  getContext(): PluginSurfaceContext | null;
+  registerSurface(
+    surface: "settings" | "composer",
+    component: (props: any) => unknown,
+  ): () => void;
+  registerComposerPreparation?(
+    handler: ComposerPreparationHandler,
+  ): () => void;
+}
 
 export interface PluginSetupHost extends PluginHost {
   registerRenderer(registration: {
