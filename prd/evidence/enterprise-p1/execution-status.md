@@ -1,5 +1,23 @@
 # 执行状态与本地验证
 
+## 2026-10-26 R0–R2 搜索设置后端
+
+开发恢复范围仅限 R0–R2（P10a 验收、P10b1 合同冻结、`pre_send`、`search.get/save/test/recover`）。未推送、未跑 live、未实施 R3 编排/R4 UI/R5 三模式。
+
+| 子项 | 结果 |
+|---|---|
+| R0 brief | `prd/evidence/enterprise-p1/task-R0-R2-brief.md` |
+| R1 P10a 独立验收 | `task-R1-p10a-acceptance.md`；`test_enterprise_search_http.py` **125→128**（含 pre_send 3 项）本地 PASS；不勾满主任务 5.1（缺真实供应商） |
+| P10b1 合同 | `search-settings-contract.md` 冻结 READY |
+| R2a `pre_send` | `SearchHttpAttempt.search(..., pre_send=)`；拒绝/超时零 send |
+| R2b settings | 新模块 `search_settings.py` + `search_settings_actions.py`；注册 `search.get/save/test/recover`；Host+SQLite+MockTransport |
+| 定向门槛 | `uv run pytest tests/unit/plugins/test_enterprise_search_http.py tests/unit/plugins/test_enterprise_search_settings.py -q` → **136 passed**；Ruff/format/strict mypy 通过 |
+| OpenSpec | **不**勾选主 5.3 / UI 2.4 整项（缺 UI 与编排）；主计划仍 **15/29**、UI **5/13**、私库 **6/18** |
+
+后续建议：R3 operation 主备编排 → R4 搜索设置 UI → R5 三模式。
+
+---
+
 ## 2026-10-26 最新本地验证与提交修复
 
 提交阻塞已修复并逐批独立审查通过：动态插件私库模型改为相对导入；同步动作目录、探针精确请求序列、真实 SDK Context 和运行配置夹具；Bridge 转发保留现有 plugin_context；对 cron-only 和 search-only 单测隔离并恢复 SDK 全局插件注册表。保留原权限、撤权、严格工具集合及请求预算检查。

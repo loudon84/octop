@@ -10,6 +10,7 @@ from octop.infra.agents.plugins.host import register_host_setup
 
 from .enterprise_knowledge.actions import register_actions
 from .enterprise_knowledge.provisioning_actions import register_provisioning_actions
+from .enterprise_knowledge.search_settings_actions import register_search_actions
 from .enterprise_knowledge.service import KnowledgeService
 from .enterprise_knowledge.tools import register_tools
 
@@ -29,7 +30,11 @@ def setup(ctx: PluginContext) -> None:
             },
         )
         facade.register_read_only_tools([function.__name__ for function in tool_functions.values()])
-        for action in (*register_actions(facade), *register_provisioning_actions(facade)):
+        for action in (
+            *register_actions(facade),
+            *register_provisioning_actions(facade),
+            *register_search_actions(facade),
+        ):
             facade.register_action(
                 action.name,
                 action.input_model,

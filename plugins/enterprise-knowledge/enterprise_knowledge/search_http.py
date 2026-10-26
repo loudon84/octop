@@ -9,7 +9,7 @@ import math
 import re
 import ssl
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from typing import Any, Literal, NoReturn, cast
 from urllib.parse import unquote_to_bytes, urlencode, urlsplit
@@ -388,7 +388,11 @@ class SearchHttpAttempt:
         self._client_closed = False
 
     async def search(
-        self, public_query: str, *, deadline_at: float | None = None
+        self,
+        public_query: str,
+        *,
+        deadline_at: float | None = None,
+        pre_send: Callable[[], Awaitable[None]] | None = None,
     ) -> SearchHttpResult:
         if self._state != "NEW":
             raise SearchHttpError(self._provider, "INVALID_USAGE")
@@ -447,6 +451,17 @@ class SearchHttpAttempt:
                     headers=headers,
                 )
             remaining = self._remaining(deadline)
+            if remaining <= 0:
+                raise SearchHttpError(self._provider, "TIMEOUT")
+            if pre_send is not None:
+                try:
+                    await asyncio.wait_for(pre_send(), timeout=remaining)
+                except TimeoutError:
+                    raise SearchHttpError(self._provider, "TIMEOUT") from None
+                self._ensure_time(deadline)
+                remaining = self._remaining(deadline)
+                if remaining <= 0:
+                    raise SearchHttpError(self._provider, "TIMEOUT")
             request.extensions["timeout"] = {
                 "connect": remaining,
                 "read": remaining,
@@ -505,6 +520,10 @@ class SearchHttpAttempt:
             self._credential = None
             raise
         except SearchHttpError:
+            self._state = "DONE"
+            self._credential = None
+            raise
+        except Exception:
             self._state = "DONE"
             self._credential = None
             raise

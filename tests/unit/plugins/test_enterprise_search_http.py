@@ -1212,3 +1212,68 @@ async def test_caller_cancellation_propagates_and_close_drains() -> None:
     release.set()
     await attempt.aclose()
     assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_send_callback_runs_before_http_and_allows_send() -> None:
+    requests: list[httpx.Request] = []
+    order: list[str] = []
+
+    async def pre_send() -> None:
+        order.append("pre_send")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        order.append("send")
+        requests.append(request)
+        await request.aread()
+        return httpx.Response(200, json={"results": []}, request=request)
+
+    attempt = SearchHttpAttempt(_config(), transport=httpx.MockTransport(handler))
+    result = await attempt.search("exact-query", pre_send=pre_send)
+    await attempt.aclose()
+    assert result.status == "EMPTY"
+    assert order == ["pre_send", "send"]
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_send_rejection_prevents_client_request() -> None:
+    requests: list[httpx.Request] = []
+
+    async def pre_send() -> None:
+        raise RuntimeError("denied-sentinel")
+
+    attempt = SearchHttpAttempt(
+        _config(),
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request) or httpx.Response(200, json={"results": []})
+        ),
+    )
+    with pytest.raises(RuntimeError, match="denied-sentinel"):
+        await attempt.search("query", pre_send=pre_send)
+    await attempt.aclose()
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_pre_send_timeout_maps_to_timeout_with_zero_send() -> None:
+    requests: list[httpx.Request] = []
+
+    async def pre_send() -> None:
+        await asyncio.sleep(60)
+
+    attempt = SearchHttpAttempt(
+        _config(),
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request) or httpx.Response(200, json={"results": []})
+        ),
+    )
+    with pytest.raises(SearchHttpError) as caught:
+        await attempt.search(
+            "query",
+            deadline_at=time.monotonic() + 0.05,
+            pre_send=pre_send,
+        )
+    await attempt.aclose()
+    assert caught.value.code == "TIMEOUT"
+    assert requests == []
