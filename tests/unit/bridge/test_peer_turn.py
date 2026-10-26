@@ -25,6 +25,7 @@ def test_bridge_turn_ws_payload_keeps_composer_fields() -> None:
             "knowledge_base_ids": ["kb1"],
             "hitl_policy": {"mode": "allow_all"},
             "conversation_mode": "ask",
+            "plugin_context": {"enterprise-knowledge": {"query": "current"}},
             "reasoning_mode": "enabled",
             "target_agent_ids": ["doctor"],
             "mcp_servers": ["gmail"],
@@ -37,6 +38,7 @@ def test_bridge_turn_ws_payload_keeps_composer_fields() -> None:
     assert out["knowledge_base_ids"] == ["kb1"]
     assert out["hitl_policy"] == {"mode": "allow_all"}
     assert out["conversation_mode"] == "ask"
+    assert out["plugin_context"] == {"enterprise-knowledge": {"query": "current"}}
     assert out["reasoning_mode"] == "enabled"
     assert out["target_agent_ids"] == ["doctor"]
     assert out["mcp_servers"] == ["gmail"]

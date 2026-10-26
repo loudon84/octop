@@ -30,7 +30,10 @@ export interface Session {
   artifacts?: ThreadArtifact[];
   turnActive?: boolean;
   awaitingUser?: boolean;
+  pendingToken?: number;
 }
+
+let pendingSessionSequence = 0;
 
 /** Result of probing whether a thread exists for the current agent. */
 export type ThreadProbeResult = "found" | "missing" | "unknown";
@@ -524,56 +527,71 @@ export function useSessions(agentId: string | null) {
     });
   }, []);
 
-  const createSession = useCallback((): {
-    session: Session;
-    resolvedId: Promise<string>;
-  } => {
-    if (!agentId) {
-      const empty: Session = {
-        id: "",
+  const createSession = useCallback(
+    (options?: {
+      isCurrent?: () => boolean;
+    }): {
+      session: Session;
+      resolvedId: Promise<string>;
+    } => {
+      if (!agentId) {
+        const empty: Session = {
+          id: "",
+          name: "New Chat",
+          threadId: "",
+          updatedAt: null,
+          channelType: "dashboard",
+        };
+        return { session: empty, resolvedId: Promise.resolve("") };
+      }
+      const pendingToken = ++pendingSessionSequence;
+      const placeholder: Session = {
+        id: "__pending__",
         name: "New Chat",
         threadId: "",
-        updatedAt: null,
+        updatedAt: new Date().toISOString(),
         channelType: "dashboard",
+        pendingToken,
       };
-      return { session: empty, resolvedId: Promise.resolve("") };
-    }
-    const placeholder: Session = {
-      id: "__pending__",
-      name: "New Chat",
-      threadId: "",
-      updatedAt: new Date().toISOString(),
-      channelType: "dashboard",
-    };
-    setModuleSessions((prev) => sortSessions([placeholder, ...prev]));
-    const resolvedId = octopThreadsApi
-      .create(agentId)
-      .then((created) => {
-        markPendingThread(created.thread_id);
-        const now = Math.floor(Date.now() / 1000);
-        const session = toSession({
-          thread_id: created.thread_id,
-          title: null,
-          // last_active stays 0 server-side until first turn; use created_at for sort.
-          last_active: 0,
-          created_at: now,
-          channel_type: "dashboard",
-          agent_id: agentId,
+      setModuleSessions((prev) => sortSessions([placeholder, ...prev]));
+      const resolvedId = octopThreadsApi
+        .create(agentId)
+        .then((created) => {
+          if (options?.isCurrent && !options.isCurrent()) {
+            setModuleSessions((prev) =>
+              prev.filter((s) => s.pendingToken !== pendingToken),
+            );
+            return "";
+          }
+          markPendingThread(created.thread_id);
+          const now = Math.floor(Date.now() / 1000);
+          const session = toSession({
+            thread_id: created.thread_id,
+            title: null,
+            // last_active stays 0 server-side until first turn; use created_at for sort.
+            last_active: 0,
+            created_at: now,
+            channel_type: "dashboard",
+            agent_id: agentId,
+          });
+          setModuleSessions((prev) =>
+            sortSessions([
+              session,
+              ...prev.filter((s) => s.pendingToken !== pendingToken),
+            ]),
+          );
+          return created.thread_id;
+        })
+        .catch(() => {
+          setModuleSessions((prev) =>
+            prev.filter((s) => s.pendingToken !== pendingToken),
+          );
+          return "";
         });
-        setModuleSessions((prev) =>
-          sortSessions([
-            session,
-            ...prev.filter((s) => s.id !== "__pending__"),
-          ]),
-        );
-        return created.thread_id;
-      })
-      .catch(() => {
-        setModuleSessions((prev) => prev.filter((s) => s.id !== "__pending__"));
-        return "";
-      });
-    return { session: placeholder, resolvedId };
-  }, [agentId]);
+      return { session: placeholder, resolvedId };
+    },
+    [agentId],
+  );
 
   const deleteSession = useCallback(
     async (id: string, compact: boolean) => {

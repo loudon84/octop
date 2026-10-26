@@ -1,0 +1,9 @@
+id: enterprise-knowledge
+version: 0.1.0
+name: Enterprise Knowledge
+description: Controlled enterprise knowledge configuration and access
+kind: tool
+entry: main.py
+ui:
+  entry: ui/dist/index.js
+  manifest: ui/dist/manifest.json

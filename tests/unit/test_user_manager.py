@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -50,6 +52,136 @@ async def test_duplicate_username_rejected(manager: UserManager):
     with pytest.raises(OctopError) as ei:
         await manager.create(username="a", password="TestPass34", role=Role.USER)
     assert ei.value.code is ErrorCode.USERNAME_TAKEN
+
+
+async def test_new_user_notifies_once_after_creation_and_notifier_failure_is_safe(
+    manager: UserManager, caplog: pytest.LogCaptureFixture
+) -> None:
+    notifications: list[None] = []
+    manager._user_created_notifier = lambda: notifications.append(None)
+
+    created = await manager.create(username="notified", password="TestPass12", role=Role.USER)
+
+    assert created.id is not None
+    assert notifications == [None]
+    manager._user_created_notifier = lambda: (_ for _ in ()).throw(
+        RuntimeError("sensitive-notifier-detail")
+    )
+    failed_wake_user = await manager.create(
+        username="wake-failed", password="TestPass12", role=Role.USER
+    )
+    assert manager._services.user_repo.get(failed_wake_user.id) is not None
+    assert "sensitive-notifier-detail" not in caplog.text
+    assert "user-created notifier failed" in caplog.text
+
+
+async def test_notifier_survives_service_replacement_and_does_not_swallow_cancellation(
+    manager: UserManager,
+) -> None:
+    notifications: list[None] = []
+    manager._user_created_notifier = lambda: notifications.append(None)
+    manager.replace_services(manager._services)
+    await manager.create(username="after-rebind", password="TestPass12", role=Role.USER)
+    assert notifications == [None]
+
+    manager._user_created_notifier = lambda: (_ for _ in ()).throw(asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        manager.notify_user_created()
+
+
+async def test_invite_creation_notifies_once_only_after_success(manager: UserManager):
+    from octop.infra.users.invites import InviteService
+
+    notifications: list[None] = []
+    manager._user_created_notifier = lambda: notifications.append(None)
+    admin = await manager.create(username="invite-admin", password="TestPass12", role=Role.ADMIN)
+    invite = InviteService(manager._services).create(
+        created_by=admin.id,
+        actor_username=admin.username,
+    )
+    assert notifications == [None]
+
+    invited = await manager.create_from_invite(
+        code=invite.code,
+        username="invitee",
+        password="TestPass12",
+    )
+    assert invited.username == "invitee"
+    assert notifications == [None, None]
+    with pytest.raises(OctopError):
+        await manager.create_from_invite(
+            code=invite.code,
+            username="invitee-again",
+            password="TestPass12",
+        )
+    assert notifications == [None, None]
+
+    failed_wake_invite = InviteService(manager._services).create(
+        created_by=admin.id,
+        actor_username=admin.username,
+    )
+    manager._user_created_notifier = lambda: (_ for _ in ()).throw(
+        RuntimeError("invite wake unavailable")
+    )
+    committed = await manager.create_from_invite(
+        code=failed_wake_invite.code,
+        username="invite-wake-failed",
+        password="TestPass12",
+    )
+    assert manager._services.user_repo.get(committed.id) is not None
+    assert manager._services.invite_repo.get_by_code(failed_wake_invite.code).used_at is not None
+    with pytest.raises(OctopError):
+        await manager.create_from_invite(
+            code=failed_wake_invite.code,
+            username="invite-wake-failed-again",
+            password="TestPass12",
+        )
+
+
+async def test_sso_notifies_new_identity_once_but_existing_login_never_again(
+    manager: UserManager,
+):
+    provider_id = _insert_sso_provider(manager)
+    notifications: list[None] = []
+    manager._user_created_notifier = lambda: notifications.append(None)
+
+    created = await manager.resolve_or_create_sso_user(
+        provider_id=provider_id,
+        subject="notified-subject",
+        claims={"preferred_username": "notified-sso"},
+    )
+    assert created.username == "notified-sso"
+    assert notifications == [None]
+
+    await manager.resolve_or_create_sso_user(
+        provider_id=provider_id,
+        subject="notified-subject",
+        claims={"preferred_username": "notified-sso"},
+    )
+    assert notifications == [None]
+
+
+async def test_sso_link_notifies_only_when_identity_is_new(manager: UserManager):
+    provider_id = _insert_sso_provider(manager, kind="feishu")
+    user = await manager.create(username="sso-link-user", password="TestPass12", role=Role.USER)
+    notifications: list[None] = []
+    manager._user_created_notifier = lambda: notifications.append(None)
+    claims = {"preferred_username": user.username}
+
+    await manager.bind_sso_identity(
+        user_id=user.id,
+        provider_id=provider_id,
+        subject="new-link",
+        claims=claims,
+    )
+    await manager.bind_sso_identity(
+        user_id=user.id,
+        provider_id=provider_id,
+        subject="new-link",
+        claims=claims,
+    )
+
+    assert notifications == [None]
 
 
 async def test_authenticate_success(manager: UserManager):
@@ -221,6 +353,121 @@ async def test_sso_email_conflict_does_not_overwrite_existing_email(manager: Use
     )
 
     assert manager.get_row(user.id).email is None
+
+
+async def test_sso_enabled_registration_policy_rejects_missing_and_claimed_email(
+    manager: UserManager,
+):
+    provider_id = _insert_sso_provider(manager)
+    manager._services.settings_repo.set("user_registration.email_required", "true")
+    manager._services.user_repo.create(
+        username="local", password_hash="not-used", role="user", email="taken@example.com"
+    )
+
+    with pytest.raises(OctopError) as missing:
+        await manager.resolve_or_create_sso_user(
+            provider_id=provider_id, subject="no-email", claims={"preferred_username": "missing"}
+        )
+    with pytest.raises(OctopError) as duplicate:
+        await manager.resolve_or_create_sso_user(
+            provider_id=provider_id,
+            subject="claimed-email",
+            claims={"preferred_username": "duplicate", "email": "Taken@Example.com"},
+        )
+
+    assert missing.value.code is ErrorCode.EMAIL_REQUIRED
+    assert duplicate.value.code is ErrorCode.EMAIL_TAKEN
+    assert manager._services.user_repo.get_by_sso(provider_id, "no-email") is None
+    assert manager._services.user_repo.get_by_sso(provider_id, "claimed-email") is None
+
+
+async def test_sso_enabled_policy_normalizes_first_email_and_keeps_bound_login_compatible(
+    manager: UserManager,
+):
+    provider_id = _insert_sso_provider(manager)
+    manager._services.settings_repo.set("user_registration.email_required", "true")
+    created = await manager.resolve_or_create_sso_user(
+        provider_id=provider_id,
+        subject="new-subject",
+        claims={"preferred_username": "new-user", "email": " New@Example.com "},
+    )
+    assert manager.get_row(created.id).email == "new@example.com"
+
+    legacy = manager._services.user_repo.create(
+        username="legacy", password_hash=None, role="user", email=None
+    )
+    manager._services.user_repo.upsert_sso_identity(
+        legacy, provider_id=provider_id, subject="legacy-subject"
+    )
+    linked = await manager.resolve_or_create_sso_user(
+        provider_id=provider_id,
+        subject="legacy-subject",
+        claims={"email": "new@example.com"},
+    )
+    assert linked.id == legacy
+    assert manager.get_row(legacy).email is None
+
+
+async def test_existing_sso_binding_survives_missing_email_and_invalid_policy(
+    manager: UserManager,
+):
+    provider_id = _insert_sso_provider(manager)
+    existing = await manager.resolve_or_create_sso_user(
+        provider_id=provider_id,
+        subject="bound-with-missing-claim",
+        claims={"preferred_username": "bound-user", "email": "bound@example.com"},
+    )
+    manager._services.settings_repo.set("user_registration.email_required", "invalid")
+
+    resolved = await manager.resolve_or_create_sso_user(
+        provider_id=provider_id,
+        subject="bound-with-missing-claim",
+        claims={"preferred_username": "bound-user"},
+    )
+
+    assert resolved.id == existing.id
+    assert manager.get_row(existing.id).email == "bound@example.com"
+    assert manager._services.user_repo.count() == 1
+
+
+async def test_sso_email_unique_race_lookup_runs_in_executor(
+    manager: UserManager, monkeypatch: pytest.MonkeyPatch
+):
+    provider_id = _insert_sso_provider(manager)
+    manager._services.settings_repo.set("user_registration.email_required", "true")
+    manager._services.user_repo.create(
+        username="email-owner",
+        password_hash="not-used",
+        role="user",
+        email="race@example.com",
+    )
+    repo = manager._services.user_repo
+    original_lookup = repo.get_by_email
+    lookup_threads: list[int] = []
+
+    def lookup(email: str):
+        lookup_threads.append(threading.get_ident())
+        if len(lookup_threads) == 1:
+            return None
+        return original_lookup(email)
+
+    def raise_email_unique_violation(**_kwargs):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: users.email")
+
+    monkeypatch.setattr(repo, "get_by_email", lookup)
+    monkeypatch.setattr(repo, "create", raise_email_unique_violation)
+    loop_thread = threading.get_ident()
+
+    with pytest.raises(OctopError) as duplicate:
+        await manager.resolve_or_create_sso_user(
+            provider_id=provider_id,
+            subject="concurrent-subject",
+            claims={"preferred_username": "concurrent-user", "email": "race@example.com"},
+        )
+
+    assert duplicate.value.code is ErrorCode.EMAIL_TAKEN
+    assert lookup_threads[0] == loop_thread
+    assert lookup_threads[-1] != loop_thread
 
 
 async def test_sso_disabled_user_is_rejected(manager: UserManager):

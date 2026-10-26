@@ -1,0 +1,9 @@
+{
+  "errors.CONFIG_INVALID": "The current message cannot be used for enterprise retrieval.",
+  "errors.ACCESS_DENIED": "Enterprise retrieval is not available for this turn.",
+  "errors.PLUGIN_NOT_READY": "Required enterprise plugins are not ready.",
+  "errors.UPSTREAM_UNAVAILABLE": "Enterprise knowledge is temporarily unavailable.",
+  "errors.READ_SOURCE_CHANGED": "Enterprise knowledge access changed during this turn.",
+  "errors.UPSTREAM_SCHEMA_INVALID": "Enterprise knowledge returned an unsupported response.",
+  "empty": "No authorized knowledge matched this question."
+}

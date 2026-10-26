@@ -99,4 +99,158 @@ describe("401 handling", () => {
 
     window.removeEventListener(mod.UNAUTHORIZED_EVENT, listener);
   });
+
+  it("does not clear a replacement login when an older request returns 401", async () => {
+    let resolveFetch!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          }),
+      ),
+    );
+
+    const oldRequest = mod.request("/agents");
+    mod.setAuthToken("new-login-token");
+    resolveFetch(
+      new Response(
+        JSON.stringify({ error: { code: "AUTH_FAILED", message: "expired" } }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await expect(oldRequest).rejects.toThrow(/session changed/i);
+    expect(mod.getAuthToken()).toBe("new-login-token");
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("does not persist an old sliding renewal after a replacement login", async () => {
+    let resolveFetch!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          }),
+      ),
+    );
+
+    const oldRequest = mod.request("/agents");
+    mod.setAuthToken("new-login-token");
+    resolveFetch(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "X-Octop-Access-Token": "old-renewed-token",
+        },
+      }),
+    );
+
+    await expect(oldRequest).rejects.toThrow(/session changed/i);
+    expect(mod.getAuthToken()).toBe("new-login-token");
+  });
+
+  it("rejects a response whose JSON body settles after the session changes", async () => {
+    let releaseBody!: (
+      controller: ReadableStreamDefaultController<Uint8Array>,
+    ) => void;
+    const bodyReady = new Promise<ReadableStreamDefaultController<Uint8Array>>(
+      (resolve) => {
+        releaseBody = resolve;
+      },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              pull(controller) {
+                releaseBody(controller);
+              },
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          ),
+        ),
+      ),
+    );
+
+    const oldRequest = mod.request<{ ok: boolean }>("/agents");
+    const bodyController = await bodyReady;
+    mod.setAuthToken("new-login-token");
+    bodyController.enqueue(new TextEncoder().encode('{"ok":true}'));
+    bodyController.close();
+
+    await expect(oldRequest).rejects.toThrow(/session changed/i);
+  });
+
+  it("rejects a Blob whose body read settles after the session changes", async () => {
+    let releaseBody!: (
+      controller: ReadableStreamDefaultController<Uint8Array>,
+    ) => void;
+    const bodyReady = new Promise<ReadableStreamDefaultController<Uint8Array>>(
+      (resolve) => {
+        releaseBody = resolve;
+      },
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              pull(controller) {
+                releaseBody(controller);
+              },
+            }),
+            { status: 200, headers: { "content-length": "1" } },
+          ),
+        ),
+      ),
+    );
+
+    const oldRequest = mod.requestBlob("/agents/file");
+    const bodyController = await bodyReady;
+    mod.setAuthToken("new-login-token");
+    bodyController.enqueue(new Uint8Array([1]));
+    bodyController.close();
+
+    await expect(oldRequest).rejects.toThrow(/session changed/i);
+  });
+
+  it("settles an upload with a stale-session rejection from xhr.onload", async () => {
+    class DeferredXhr {
+      static instance: DeferredXhr;
+      status = 200;
+      responseText = "{}";
+      upload = {};
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      open = vi.fn();
+      setRequestHeader = vi.fn();
+      getResponseHeader = vi.fn(() => null);
+      send = vi.fn();
+      constructor() {
+        DeferredXhr.instance = this;
+      }
+      fireLoad() {
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal("XMLHttpRequest", DeferredXhr);
+
+    const oldUpload = mod.requestUpload("/agents/file", new FormData());
+    mod.setAuthToken("new-login-token");
+    DeferredXhr.instance.fireLoad();
+
+    await expect(oldUpload).rejects.toThrow(/session changed/i);
+  });
 });

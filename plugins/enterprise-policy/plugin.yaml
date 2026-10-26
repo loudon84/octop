@@ -1,0 +1,6 @@
+id: enterprise-policy
+version: 0.1.0
+name: Enterprise Policy
+description: Enforces enterprise knowledge policy during agent turns
+kind: hook
+entry: main.py

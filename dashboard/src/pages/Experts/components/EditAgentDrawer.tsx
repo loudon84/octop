@@ -1,6 +1,7 @@
 // dashboard/src/pages/Experts/components/EditAgentDrawer.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { PluginSettingsSurface } from "../../../plugins/toolRenderers/PluginSettingsSurface";
 import {
   Alert,
   App,
@@ -1396,13 +1397,16 @@ export default function EditAgentDrawer({
       }
     >
       {open && agent ? (
-        <EditAgentDrawerBody
-          agent={agent}
-          onClose={onClose}
-          onSaved={onSaved}
-          onSaveReady={handleSaveReady}
-          onSavingChange={setSaving}
-        />
+        <>
+          <EditAgentDrawerBody
+            agent={agent}
+            onClose={onClose}
+            onSaved={onSaved}
+            onSaveReady={handleSaveReady}
+            onSavingChange={setSaving}
+          />
+          <PluginSettingsSurface agentId={agent.agent_id} location="expert" />
+        </>
       ) : null}
     </Drawer>
   );

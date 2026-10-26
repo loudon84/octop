@@ -65,4 +65,39 @@ describe("auth token remember / session-only", () => {
     expect(mod.getAuthToken()).toBe("");
     expect(sessionStorage.getItem("auth_token")).toBeNull();
   });
+
+  it("invalidates synchronously on explicit token changes but preserves same-token writes and renewal", () => {
+    const getEpoch = (mod as unknown as { getAuthSessionEpoch: () => number })
+      .getAuthSessionEpoch;
+    const subscribe = (
+      mod as unknown as {
+        subscribeAuthSession: (listener: () => void) => () => void;
+      }
+    ).subscribeAuthSession;
+    expect(typeof getEpoch).toBe("function");
+    expect(typeof subscribe).toBe("function");
+    const listener = vi.fn();
+    const unsubscribe = subscribe(listener);
+
+    mod.setAuthToken("first");
+    const firstEpoch = getEpoch();
+    mod.setAuthToken("first");
+    expect(getEpoch()).toBe(firstEpoch);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    mod.setAuthToken("second");
+    expect(getEpoch()).toBeGreaterThan(firstEpoch);
+    const secondEpoch = getEpoch();
+    mod.applyRenewedAccessToken(
+      new Response(null, {
+        headers: { "X-Octop-Access-Token": "slid" },
+      }),
+    );
+    expect(getEpoch()).toBe(secondEpoch);
+
+    mod.clearAuthToken();
+    expect(getEpoch()).toBeGreaterThan(secondEpoch);
+    expect(listener).toHaveBeenCalledTimes(3);
+    unsubscribe();
+  });
 });

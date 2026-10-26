@@ -160,19 +160,24 @@ async def iter_dashboard_hitl_resume_sse(
     )
     disconnected = False
     followup_pause = False
-    # Clear the in-memory pause before the (possibly long) resume stream so
-    # history reload cannot reinject the same card while the turn continues.
-    if pending is not None:
-        hitl_coordinator.store.mark_resolved(
-            pending.pending_id,
-            "rejected" if rejected else "approved",
-        )
+    pending_consumed = False
+
+    def consume_pending() -> None:
+        nonlocal pending_consumed
+        if pending is not None and not pending_consumed:
+            hitl_coordinator.store.mark_resolved(
+                pending.pending_id,
+                "rejected" if rejected else "approved",
+            )
+            pending_consumed = True
+
     try:
         async for chunk in processor.iter_hitl_resume_chunks(
             agent_id=agent_id,
             thread_id=thread_id,
             user_id=user_id,
             decisions=decisions,
+            on_admitted=consume_pending,
         ):
             if not disconnected:
                 disconnected = await is_disconnected()
@@ -215,7 +220,7 @@ async def iter_dashboard_hitl_resume_sse(
     except Exception as exc:
         # Resume failed after we cleared the pause for reinject safety — do not
         # leave the record looking like a successful approve/reject.
-        if pending is not None:
+        if pending is not None and pending_consumed:
             hitl_coordinator.store.mark_resolved(pending.pending_id, "expired")
         yield format_sse(
             "chunk",
@@ -286,22 +291,67 @@ async def resume_hitl(
     if body.hitl_policy is not None:
         hitl_coordinator.session_policies.set(body.thread_id, body.hitl_policy.model_dump())
 
-    async def gen() -> AsyncIterator[str]:
-        async for frame in iter_dashboard_hitl_resume_sse(
-            server=server,
-            processor=processor,
-            hitl_coordinator=hitl_coordinator,
+    plugin_host = getattr(server, "plugin_host", None)
+    execution_ticket = None
+    if plugin_host is not None:
+        from octop.infra.agents.plugins.execution import issue_execution_ticket
+        from octop.infra.agents.plugins.host_contracts import PluginActor, PluginHostError
+
+        continuation = server.app_runtime.gateway.steer.continuation_metadata(body.thread_id)
+        actor = PluginActor(
+            user_id=user.id,
+            is_admin=bool(getattr(user, "is_admin", False)),
+            permissions=frozenset(getattr(user, "permissions", ()) or ()),
             agent_id=agent_id,
             thread_id=body.thread_id,
-            user_id=user.id,
-            decisions=body.decisions,
-            pending=pending,
-            session_key=session_key,
-            channel_type=channel_type,
-            locale=resolve_request_locale(request),
-            is_disconnected=request.is_disconnected,
-        ):
-            yield frame
+            locale=str(getattr(user, "locale", "en") or "en"),
+        )
+        execution_ticket = issue_execution_ticket(
+            plugin_host,
+            actor,
+            plugin_context=continuation.get("plugin_context"),
+            execution_kind="resume",
+        )
+        try:
+            await plugin_host.authorize_execution(
+                execution_ticket,
+                agent_id=agent_id,
+                thread_id=body.thread_id,
+                execution_kind="resume",
+            )
+        except PluginHostError as exc:
+            detail = OctopError(
+                ErrorCode.FORBIDDEN, "plugin execution unavailable"
+            ).localized_message(getattr(user, "locale", "en") or "en")
+            raise HTTPException(status_code=403, detail=detail) from exc
+
+    async def gen() -> AsyncIterator[str]:
+        from octop.infra.agents.plugins.execution import activate_ticket, reset_ticket
+
+        token = (
+            activate_ticket(plugin_host, execution_ticket)
+            if plugin_host is not None and execution_ticket is not None
+            else None
+        )
+        try:
+            async for frame in iter_dashboard_hitl_resume_sse(
+                server=server,
+                processor=processor,
+                hitl_coordinator=hitl_coordinator,
+                agent_id=agent_id,
+                thread_id=body.thread_id,
+                user_id=user.id,
+                decisions=body.decisions,
+                pending=pending,
+                session_key=session_key,
+                channel_type=channel_type,
+                locale=resolve_request_locale(request),
+                is_disconnected=request.is_disconnected,
+            ):
+                yield frame
+        finally:
+            if token is not None:
+                reset_ticket(token)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

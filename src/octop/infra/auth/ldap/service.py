@@ -13,6 +13,7 @@ try:
 except ImportError:  # pragma: no cover - optional PostgreSQL driver
     pg_errors = None  # type: ignore[assignment]
 
+from octop.i18n.domains.errors import error_message
 from octop.infra.auth.ldap.client import LdapClient, LdapIdentity, LdapProbeResult, LdapUnavailable
 from octop.infra.auth.ldap.config import (
     EXTRA_FIELDS,
@@ -189,7 +190,13 @@ class LdapAuthService:
                     ErrorCode.LDAP_USER_NOT_PROVISIONED,
                     "this directory account has no Octop account yet",
                 )
-            return self._provision(row, config, identity)
+            loop = asyncio.get_running_loop()
+            from octop.infra.users.registration_policy import load_registration_policy
+
+            registration_policy = await loop.run_in_executor(
+                None, load_registration_policy, self._services.settings_repo
+            )
+            return self._provision(row, config, identity, registration_policy)
 
     def _assert_group_allowed(self, config: LdapConfig, identity: LdapIdentity) -> None:
         """Refuse directory accounts outside the configured allow-list."""
@@ -202,7 +209,13 @@ class LdapAuthService:
             "this directory account is not in an allowed group",
         )
 
-    def _provision(self, row: SsoProviderRow, config: LdapConfig, identity: LdapIdentity) -> User:
+    def _provision(
+        self,
+        row: SsoProviderRow,
+        config: LdapConfig,
+        identity: LdapIdentity,
+        registration_policy: Any | None = None,
+    ) -> User:
         """Create the Octop account from a role template.
 
         The directory group only selects *which* template to start from; the
@@ -221,6 +234,15 @@ class LdapAuthService:
         template_id = ADMIN_USER_ROLE_ID if wants_admin else Role.USER.value
         assignment = role_assignment_for(self._services.db, template_id)
         role_id, role_name, permissions, policies = self._role_defaults(assignment, template_id)
+        if registration_policy is not None and registration_policy.email_required:
+            from octop.infra.users.registration_policy import validate_registration_email
+
+            email = validate_registration_email(identity.email, registration_policy)
+            assert email is not None
+            if self._services.user_repo.get_by_email(email) is not None:
+                raise OctopError(ErrorCode.EMAIL_TAKEN, error_message("EMAIL_TAKEN"))
+        else:
+            email = self._claimable_email(identity.email, None)
         username = allocate_username(
             self._services.user_repo,
             {"preferred_username": identity.username},
@@ -232,7 +254,7 @@ class LdapAuthService:
                 password_hash=None,
                 role=role_id,
                 display_name=identity.display_name,
-                email=self._claimable_email(identity.email, None),
+                email=email,
                 sso_provider_id=row.id,
                 sso_subject=identity.subject,
                 permissions=permissions,
@@ -247,6 +269,17 @@ class LdapAuthService:
                 raise
             concurrent = self._services.user_repo.get_by_sso(row.id, identity.subject)
             if concurrent is None:
+                if (
+                    registration_policy is not None
+                    and registration_policy.email_required
+                    and email is not None
+                ):
+                    from octop.infra.users.registration_policy import is_email_unique_violation
+
+                    if is_email_unique_violation(exc):
+                        raise OctopError(
+                            ErrorCode.EMAIL_TAKEN, error_message("EMAIL_TAKEN")
+                        ) from exc
                 raise
             return self._cached_or_row(concurrent)
         if policies:
@@ -254,6 +287,7 @@ class LdapAuthService:
         self._services.user_repo.upsert_sso_identity(
             uid, provider_id=row.id, subject=identity.subject
         )
+        self._user_manager.notify_user_created()
         user = User(
             id=uid,
             username=username,

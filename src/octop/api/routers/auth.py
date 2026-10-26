@@ -22,6 +22,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class RegistrationPolicyResponse(BaseModel):
+    email_required: bool = Field(
+        description="Whether new account registration requires a unique email."
+    )
+
+
+@router.get(
+    "/registration-policy",
+    response_model=RegistrationPolicyResponse,
+    summary="Get public user registration policy",
+)
+async def get_registration_policy(server: Any = Depends(get_server)) -> RegistrationPolicyResponse:
+    loop = asyncio.get_running_loop()
+    from octop.infra.users.registration_policy import load_registration_policy
+
+    policy = await loop.run_in_executor(
+        None, load_registration_policy, server.services.settings_repo
+    )
+    return RegistrationPolicyResponse(email_required=policy.email_required)
+
+
 def _user_json(user: Any, *, locale: str | None = None) -> dict[str, Any]:
     loc = normalize_locale(locale)
     return {

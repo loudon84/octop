@@ -26,6 +26,7 @@ import StreamSetupGuide from "../../../components/StreamSetupGuide/StreamSetupGu
 import { OctopEmptyMascot } from "../../../components/EmptyState/OctopEmptyMascot";
 import { useCurrentUser } from "../../../hooks/useCurrentUser";
 import { userCan } from "../../../utils/permissions";
+import { PluginSettingsSurface } from "../../../plugins/toolRenderers/PluginSettingsSurface";
 import { apiErrorMessage } from "../../../utils/apiError";
 import { copyText } from "../../../utils/copyText";
 import {
@@ -2355,6 +2356,7 @@ export default function ConnectorsPage() {
         />
       }
     >
+      <PluginSettingsSurface agentId={null} location="connectors" />
       {activeTab === "custom" ? (
         <CustomMcpTab focusServerName={customFocusServerName} />
       ) : activeTab === "enabled" ? (

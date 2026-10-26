@@ -7,11 +7,11 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from octop.api.common.content_disposition import content_disposition
 from octop.api.common.upload_limit import read_upload_capped
-from octop.api.deps import current_user, get_server, require_permission
+from octop.api.deps import current_user, get_server, require_admin, require_permission
 from octop.config import OctopConfig
 from octop.infra.agents.security import tool_execution_may_pause
 from octop.infra.auth.captcha import current_env, load_view, save_settings
@@ -26,6 +26,44 @@ from octop.infra.utils.user_downloads import (
 )
 
 router = APIRouter()
+
+
+class RegistrationPolicyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email_required: StrictBool = Field(description="Require a unique email for new accounts.")
+
+
+class RegistrationPolicyResponse(BaseModel):
+    email_required: bool = Field(
+        description="Whether new account registration requires a unique email."
+    )
+
+
+@router.put(
+    "/settings/registration-policy",
+    response_model=RegistrationPolicyResponse,
+    summary="Update user registration policy",
+)
+async def put_registration_policy(
+    body: RegistrationPolicyRequest,
+    actor: User = Depends(require_admin()),
+    server: Any = Depends(get_server),
+) -> RegistrationPolicyResponse:
+    loop = asyncio.get_running_loop()
+    from octop.infra.users.registration_policy import (
+        UserRegistrationPolicy,
+        update_registration_policy,
+    )
+
+    policy = await loop.run_in_executor(
+        None,
+        update_registration_policy,
+        server.services,
+        actor.id,
+        UserRegistrationPolicy(email_required=body.email_required),
+    )
+    return RegistrationPolicyResponse(email_required=policy.email_required)
 
 
 class TimezoneSettingsResponse(BaseModel):

@@ -13,6 +13,7 @@ from octop.infra.utils.weixin_context import with_weixin_send_token
 # Persisted on HumanMessage.additional_kwargs for dashboard history UI.
 COMPOSER_CTX_KEY = "octop_composer_context"
 INBOUND_ATTACHMENTS_KEY = "octop_inbound_attachments"
+USER_INPUT_KEY = "octop_user_input"
 # Must match octop_harness.messages.CHECKPOINT_TS_KEY (epoch-ms).
 CHECKPOINT_TS_KEY = "checkpoint_ts"
 # Persisted on AIMessage.additional_kwargs when a stream fails mid-turn.

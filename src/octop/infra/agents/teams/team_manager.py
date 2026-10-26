@@ -21,6 +21,7 @@ from dataclasses import fields
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 from octop_harness.messages import extract_call_response
 from octop_harness.teams.inbox import InboxMessage
@@ -69,6 +70,44 @@ if TYPE_CHECKING:
     from octop.infra.gateway.threads import ThreadRegistry
 
 logger = logging.getLogger(__name__)
+
+
+class PeerDispatchAuthorizationMiddleware(AgentMiddleware):
+    """Freshly authorize the real Harness ``ask_agent`` tool invocation."""
+
+    def __init__(self, team: Any, authorize: Callable[..., Any]) -> None:
+        self._team = team
+        self._authorize = authorize
+
+    async def awrap_tool_call(self, request: Any, handler: Callable[..., Any]) -> Any:
+        tool_call = getattr(request, "tool_call", {})
+        if not isinstance(tool_call, dict) or tool_call.get("name") != "ask_agent":
+            return await handler(request)
+        from octop.infra.agents.plugins.execution import current_ticket, peer_dispatch_scope
+        from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+        config = getattr(getattr(request, "runtime", None), "config", {})
+        configurable = config.get("configurable") if isinstance(config, dict) else None
+        configurable = configurable if isinstance(configurable, dict) else {}
+        from_agent_id = str(configurable.get("agent_id") or "")
+        user_id = configurable.get("user")
+        source_thread_id = configurable.get("thread_id")
+        args = tool_call.get("args")
+        expert = args.get("expert") if isinstance(args, dict) else None
+        if not from_agent_id or user_id is None or not isinstance(expert, str):
+            raise PluginHostError("denied")
+        entry = self._team.resolve_peer(user_id, expert, exclude_agent_id=from_agent_id)
+        if entry is None:
+            return await handler(request)
+        permit = await self._authorize(
+            current_ticket(),
+            from_agent_id=from_agent_id,
+            to_agent_id=entry.agent_id,
+            source_thread_id=str(source_thread_id) if source_thread_id else None,
+        )
+        with peer_dispatch_scope(permit):
+            return await handler(request)
+
 
 _ROOM_HISTORY_LIMIT = 40
 _HOST_IDLE_POLL_SEC = 0.05
@@ -735,12 +774,16 @@ class TeamManager:
 
     def install_host_dispatch(self, harness_team: Any) -> None:
         """Force team hosts onto inbox dispatch and room streaming."""
+        plugin_host = getattr(self._agent_manager, "_plugin_host", None)
         wire_host_dispatch(
             harness_team,
             is_team=lambda agent_id: is_team_agent(self._agent_manager.get_row(agent_id)),
             stream_peer=self.stream_peer_to_room,
             stream_host=self.stream_host_followup_to_room,
             take_prompt=self.take_peer_prompt,
+            authorize_peer_dispatch=(
+                plugin_host.authorize_peer_dispatch if plugin_host is not None else None
+            ),
         )
 
     # -- jobs / runtime -------------------------------------------------------
@@ -2214,11 +2257,37 @@ def wire_host_dispatch(
     stream_peer: Callable[..., Any] | None = None,
     stream_host: Callable[..., Any] | None = None,
     take_prompt: Callable[[str, str | None], tuple[str, str] | None] | None = None,
+    authorize_peer_dispatch: Callable[..., Any] | None = None,
 ) -> None:
     """Patch harness TeamManager so async ``ask_agent`` uses inbox + room stream."""
     if harness_team is None:
         return
     original_call = getattr(harness_team, "call_peer", None)
+    original_submit = getattr(harness_team, "submit_peer", None)
+
+    if original_submit is not None and authorize_peer_dispatch is not None:
+
+        def submit_peer(*, from_agent_id: str, to_agent_id: str, **kwargs: Any) -> Any:
+            from octop.infra.agents.plugins.execution import (
+                consume_peer_dispatch_permit,
+                without_execution_ticket,
+            )
+            from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+            dispatch_host = getattr(authorize_peer_dispatch, "__self__", None)
+            if dispatch_host is None or not consume_peer_dispatch_permit(
+                dispatch_host,
+                from_agent_id=from_agent_id,
+                to_agent_id=to_agent_id,
+                source_thread_id=kwargs.get("source_thread_id"),
+            ):
+                raise PluginHostError("denied")
+            with without_execution_ticket():
+                return original_submit(
+                    from_agent_id=from_agent_id, to_agent_id=to_agent_id, **kwargs
+                )
+
+        harness_team.submit_peer = submit_peer
 
     async def call_peer(
         *,
@@ -2231,33 +2300,59 @@ def wire_host_dispatch(
         session_key: str | None = None,
         **kwargs: Any,
     ) -> Any:
+        if authorize_peer_dispatch is not None:
+            from octop.infra.agents.plugins.execution import current_ticket
+
+            permit = await authorize_peer_dispatch(
+                current_ticket(),
+                from_agent_id=from_agent_id,
+                to_agent_id=to_agent_id,
+                source_thread_id=source_thread_id,
+            )
+        from octop.infra.agents.plugins.execution import without_execution_ticket
+
         if getattr(harness_team, "enabled", False) and is_team(from_agent_id):
-            return harness_team.submit_peer(
+            from octop.infra.agents.plugins.execution import peer_dispatch_scope
+
+            scope = peer_dispatch_scope(permit) if authorize_peer_dispatch is not None else None
+            if scope is None:
+                with without_execution_ticket():
+                    return harness_team.submit_peer(
+                        from_agent_id=from_agent_id,
+                        to_agent_id=to_agent_id,
+                        message=message,
+                        user_id=user_id,
+                        source_thread_id=source_thread_id,
+                        metadata={"session_key": session_key} if session_key else None,
+                    )
+            with scope, without_execution_ticket():
+                return harness_team.submit_peer(
+                    from_agent_id=from_agent_id,
+                    to_agent_id=to_agent_id,
+                    message=message,
+                    user_id=user_id,
+                    source_thread_id=source_thread_id,
+                    metadata={"session_key": session_key} if session_key else None,
+                )
+        if original_call is None:
+            raise TypeError("harness team has no call_peer")
+        with without_execution_ticket():
+            return await original_call(
                 from_agent_id=from_agent_id,
                 to_agent_id=to_agent_id,
                 message=message,
                 user_id=user_id,
+                source=source,
                 source_thread_id=source_thread_id,
-                metadata={"session_key": session_key} if session_key else None,
+                session_key=session_key,
+                **kwargs,
             )
-        if original_call is None:
-            raise TypeError("harness team has no call_peer")
-        return await original_call(
-            from_agent_id=from_agent_id,
-            to_agent_id=to_agent_id,
-            message=message,
-            user_id=user_id,
-            source=source,
-            source_thread_id=source_thread_id,
-            session_key=session_key,
-            **kwargs,
-        )
 
     harness_team.call_peer = call_peer
 
     stream_followup = stream_host or stream_peer
     original_call_agent = getattr(harness_team, "_call_agent", None)
-    if original_call_agent is not None and stream_followup is not None:
+    if original_call_agent is not None:
 
         async def call_agent(agent_id: str, request: Any) -> Any:
             source = getattr(request, "source", None)
@@ -2267,13 +2362,25 @@ def wire_host_dispatch(
             if isinstance(request, dict):
                 thread_id = request.get("thread_id")
             room = str(thread_id or "").strip()
-            if source == "inbox" and room and is_team(agent_id):
-                return await stream_followup(
-                    request,
-                    room_thread_id=room,
-                    speaker_id=agent_id,
+            from octop.infra.agents.plugins.execution import without_execution_ticket
+
+            if authorize_peer_dispatch is not None:
+                await authorize_peer_dispatch(
+                    None,
+                    from_agent_id=agent_id,
+                    to_agent_id=agent_id,
+                    source_thread_id=room or None,
+                    target_thread_id=room or None,
                 )
-            return await original_call_agent(agent_id, request)
+
+            with without_execution_ticket():
+                if stream_followup is not None and source == "inbox" and room and is_team(agent_id):
+                    return await stream_followup(
+                        request,
+                        room_thread_id=room,
+                        speaker_id=agent_id,
+                    )
+                return await original_call_agent(agent_id, request)
 
         harness_team._call_agent = call_agent
         inbox = getattr(harness_team, "inbox", None)
@@ -2287,7 +2394,9 @@ def wire_host_dispatch(
     )
 
     original_invoke = getattr(harness_team, "_invoke_peer", None)
-    if original_invoke is not None and stream_peer is not None:
+    if original_invoke is not None and (
+        stream_peer is not None or authorize_peer_dispatch is not None
+    ):
 
         async def invoke_peer(
             *,
@@ -2300,6 +2409,15 @@ def wire_host_dispatch(
             source_session_key: str | None,
             job_id: str | None = None,
         ) -> Any:
+            if authorize_peer_dispatch is not None:
+                from octop.infra.agents.plugins.execution import current_ticket
+
+                await authorize_peer_dispatch(
+                    current_ticket(),
+                    from_agent_id=from_agent_id,
+                    to_agent_id=to_agent_id,
+                    source_thread_id=source_thread_id,
+                )
             peer_kwargs = {
                 "from_agent_id": from_agent_id,
                 "to_agent_id": to_agent_id,
@@ -2315,18 +2433,29 @@ def wire_host_dispatch(
                 job_id=job_id,
                 source_thread_id=source_thread_id,
             ):
-                return await original_invoke(**_supported_kwargs(original_invoke, peer_kwargs))
+                from octop.infra.agents.plugins.execution import without_execution_ticket
+
+                with without_execution_ticket():
+                    return await original_invoke(**_supported_kwargs(original_invoke, peer_kwargs))
+            if stream_peer is None:
+                from octop.infra.agents.plugins.execution import without_execution_ticket
+
+                with without_execution_ticket():
+                    return await original_invoke(**_supported_kwargs(original_invoke, peer_kwargs))
             request = await harness_team._build_peer_request(
                 **_supported_kwargs(harness_team._build_peer_request, peer_kwargs)
             )
             enrich = getattr(harness_team, "_enrich_request", None)
             if enrich is not None:
                 request = await enrich(to_agent_id, request)
-            result = await stream_peer(
-                request,
-                room_thread_id=source_thread_id,
-                speaker_id=to_agent_id,
-            )
+            from octop.infra.agents.plugins.execution import without_execution_ticket
+
+            with without_execution_ticket():
+                result = await stream_peer(
+                    request,
+                    room_thread_id=source_thread_id,
+                    speaker_id=to_agent_id,
+                )
             payload = result if isinstance(result, dict) else {}
             after = getattr(harness_team, "_after_peer", None)
             if after is not None:

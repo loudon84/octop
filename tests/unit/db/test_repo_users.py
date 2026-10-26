@@ -10,7 +10,7 @@ import pytest
 
 from octop.infra.db.migrate import run_migrations
 from octop.infra.db.pool import SqlitePool
-from octop.infra.db.repos.users import UserRepo, UserRow
+from octop.infra.db.repos.users import UserIdentityRow, UserRepo, UserRow
 
 
 @pytest.fixture
@@ -73,3 +73,40 @@ def test_count(repo: UserRepo):
     assert repo.count() == 0
     repo.create(username="a", password_hash="h", role="user")
     assert repo.count() == 1
+
+
+def test_identity_projection_is_narrow_sorted_and_reuses_connection(repo: UserRepo) -> None:
+    first = repo.create(
+        username="identity-a", password_hash="secret-a", role="user", email="A@EXAMPLE.COM"
+    )
+    second = repo.create(username="identity-b", password_hash="secret-b", role="user")
+    repo.set_disabled(first, True)
+    with repo._db.connect() as conn:
+        rows = repo.list_identity_page(0, 1, conn=conn)
+        row = repo.get_identity(second, conn=conn)
+    with repo._db.transaction() as conn:
+        locked = repo.lock_identity_rows(conn, [second, first])
+
+        class RecordingConnection:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.statements = []
+
+            def execute(self, sql, params=()):
+                self.statements.append(sql)
+                return self.wrapped.execute(sql, params)
+
+        recording = RecordingConnection(conn)
+        repo.get_identity(first, conn=recording)
+        repo.list_identity_page(0, 2, conn=recording)
+
+    assert rows == [UserIdentityRow(first, "A@EXAMPLE.COM", True)]
+    assert row == UserIdentityRow(second, None, False)
+    assert set(UserIdentityRow.__dataclass_fields__) == {"user_id", "email", "disabled"}
+    assert [item.user_id for item in repo.list_identity_page(0, 10)] == [first, second]
+    assert [item.user_id for item in locked] == [first, second]
+    assert len(recording.statements) == 2
+    assert all(
+        "SELECT id, email, disabled" in sql and "SELECT *" not in sql
+        for sql in recording.statements
+    )

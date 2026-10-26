@@ -1,0 +1,9 @@
+{
+  "errors.CONFIG_INVALID": "当前消息无法用于企业知识检索。",
+  "errors.ACCESS_DENIED": "当前轮次无法使用企业知识检索。",
+  "errors.PLUGIN_NOT_READY": "所需企业插件尚未就绪。",
+  "errors.UPSTREAM_UNAVAILABLE": "企业知识暂时不可用。",
+  "errors.READ_SOURCE_CHANGED": "本轮企业知识访问权限已发生变化。",
+  "errors.UPSTREAM_SCHEMA_INVALID": "企业知识返回了不支持的响应。",
+  "empty": "没有找到与此问题匹配的授权知识。"
+}

@@ -1,0 +1,16 @@
+schema: spec-driven
+
+rules:
+  proposal:
+    - For user-visible UI changes, identify affected surfaces, user roles, entry points, goals, and out-of-scope behavior.
+  specs:
+    - Define user-visible UI behavior with testable scenarios, including relevant permission, validation, loading, empty, success, error, and conflict states.
+  design:
+    - Document UI surfaces, interactions, API/action boundaries, and plugin versus host responsibilities; add a wireframe or reference when layout choices affect user understanding.
+  tasks:
+    - Review proposal, specs, and design before UI implementation; include applicable localization, keyboard interaction, and state coverage in implementation tasks.
+
+operations:
+  apply:
+    guidance:
+      - Do not begin UI implementation until its OpenSpec proposal, specs, and design have been reviewed. Update and review those artifacts first when scope, permissions, interactions, or acceptance behavior changes.

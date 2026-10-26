@@ -17,6 +17,7 @@ USER_TURN_WS_KEYS = frozenset(
         "reasoning_effort",
         "conversation_mode",
         "hitl_policy",
+        "plugin_context",
         "mcp_servers",
         "knowledge_base_ids",
         "skills",

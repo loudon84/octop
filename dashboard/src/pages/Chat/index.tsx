@@ -1,4 +1,11 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import {
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+  useMemo,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
@@ -21,7 +28,11 @@ import { useHitlEnabled } from "../../hooks/useHitlEnabled";
 import { useCurrentUser } from "../../hooks/useCurrentUser";
 import { navAllowed, userCan } from "../../utils/permissions";
 import { useChat } from "./hooks/useChat";
-import { useSessions, fetchAndSyncSessionArtifacts } from "./hooks/useSessions";
+import {
+  useSessions,
+  fetchAndSyncSessionArtifacts,
+  isPendingThread,
+} from "./hooks/useSessions";
 import * as chatStore from "./hooks/chatStore";
 import { formatRunUsage, assistantTurnsFromEnd } from "./utils/chatMessages";
 import { useChatSidebarState } from "./hooks/useChatSidebarState";
@@ -31,7 +42,11 @@ import { useChatSend, type ChatSendOverrides } from "./hooks/useChatSend";
 import {
   useChatMessageQueue,
   type ChatQueueFlushContext,
+  type ChatQueueFlushResult,
+  type EnqueueChatItemInput,
+  type NativeTarget,
   type QueuedChatItem,
+  type SubmitResult,
 } from "./hooks/useChatMessageQueue";
 import { useChatNavigation } from "./hooks/useChatNavigation";
 import { useChatSessionActions } from "./hooks/useChatSessionActions";
@@ -100,9 +115,13 @@ import {
   findAutoResumableApproval,
   findPendingAsk,
   hasPendingHitl,
+  type PendingAsk,
 } from "./utils/pendingHitl";
 import { isAgentChatReady } from "../../utils/agentError";
 import { useMemoryMaintenance } from "./hooks/useMemoryMaintenance";
+import { restoreComposerSelections } from "../../plugins/toolRenderers/composerPreparation";
+import { listPluginSurfaces } from "../../plugins/toolRenderers/registry";
+import { isAuthSessionCurrent } from "../../api/authSession";
 import MemoryMaintenanceBanner from "./components/MemoryMaintenanceBanner";
 import { useHistoryMigration } from "./hooks/useHistoryMigration";
 import HistoryMigrationBanner from "./components/HistoryMigrationBanner";
@@ -114,14 +133,321 @@ import {
   usePluginToolUis,
   setPluginUiDockHandlers,
 } from "../../plugins/toolRenderers";
+import { PluginSurface } from "../../plugins/toolRenderers/PluginSurface";
+import { PluginReadinessNotice } from "../../plugins/toolRenderers/PluginReadinessNotice";
+import type {
+  PluginReadinessTarget,
+  PluginToolUiReadiness,
+} from "../../plugins/toolRenderers/usePluginToolUis";
+import { useServerTimezone } from "../../hooks/useServerTimezone";
 import styles from "./index.module.less";
 
 export default function ChatPage() {
   return <ChatPageInner />;
 }
 
+export function requestBoundQueueItemFlush(
+  isBound: boolean,
+  target: NativeTarget,
+  requestFlush: (target: NativeTarget) => void,
+): boolean {
+  if (!isBound) return false;
+  requestFlush(target);
+  return true;
+}
+
+export async function routeGuardedChatSend(args: {
+  text: string;
+  attachments?: ChatAttachment[];
+  overrides?: ChatSendOverrides;
+  activeThreadId: string | null;
+  pendingAsk: PendingAsk | null;
+  hasPendingHitlPause: boolean;
+  findPendingAskForThread: (threadId: string) => PendingAsk | null;
+  hasPendingHitlForThread: (threadId: string) => boolean;
+  interceptUserMessage: (text: string) => boolean;
+  resumeHitl: (
+    actions: { type: "respond"; message: string }[],
+    threadId?: string,
+  ) => void;
+  handleSend: (
+    text: string,
+    attachments?: ChatAttachment[],
+    overrides?: ChatSendOverrides,
+  ) => Promise<SubmitResult>;
+  warn: (key: string) => void;
+}): Promise<SubmitResult> {
+  const {
+    text,
+    attachments,
+    overrides,
+    activeThreadId,
+    pendingAsk,
+    hasPendingHitlPause,
+    findPendingAskForThread,
+    hasPendingHitlForThread,
+    interceptUserMessage,
+    resumeHitl,
+    handleSend,
+    warn,
+  } = args;
+  if (interceptUserMessage(text)) return { status: "accepted" };
+
+  const targetThreadId = overrides?.threadId ?? activeThreadId ?? undefined;
+  const ask =
+    targetThreadId && targetThreadId === activeThreadId
+      ? pendingAsk
+      : targetThreadId
+      ? findPendingAskForThread(targetThreadId)
+      : pendingAsk;
+  if (ask) {
+    const trimmed = text.trim();
+    if (attachments && attachments.length > 0) {
+      warn("chat.ask.useCardForAttachments");
+      return { status: "rejected", reason: "blocked" };
+    }
+    if (!trimmed) return { status: "rejected", reason: "empty" };
+    resumeHitl(
+      ask.actions.map(() => ({ type: "respond", message: trimmed })),
+      targetThreadId,
+    );
+    return { status: "accepted" };
+  }
+
+  const blocked =
+    targetThreadId && targetThreadId === activeThreadId
+      ? hasPendingHitlPause
+      : targetThreadId
+      ? hasPendingHitlForThread(targetThreadId)
+      : hasPendingHitlPause;
+  if (blocked) {
+    warn("chat.hitl.finishPendingFirst");
+    return { status: "rejected", reason: "blocked" };
+  }
+  return await handleSend(text, attachments, overrides);
+}
+
+export async function dispatchPreparedQueueItem(
+  item: QueuedChatItem,
+  target: NativeTarget,
+  refresh: (target: NativeTarget) => Promise<PluginToolUiReadiness>,
+  sendMessage: ReturnType<typeof useChat>["sendMessage"],
+  editAndResend: ReturnType<typeof useChat>["editAndResend"],
+): Promise<ChatQueueFlushResult> {
+  if (!target.threadId) return { status: "rejected", reason: "blocked" };
+  if (!isAuthSessionCurrent(item.authEpoch)) {
+    return { status: "rejected", reason: "cancelled" };
+  }
+  const readiness = await refresh(target);
+  if (
+    readiness.status !== "ready" ||
+    readiness.unavailablePlugins.length > 0 ||
+    !isAuthSessionCurrent(item.authEpoch)
+  )
+    return { status: "rejected", reason: "blocked" };
+  if (chatStore.isSessionBusyForTurnDispatch(target.threadId, target.agentId)) {
+    return { status: "rejected", reason: "blocked" };
+  }
+  const composerIds = new Set(
+    listPluginSurfaces("composer").map((entry) => entry.pluginId),
+  );
+  if (
+    Object.keys(readiness.requiredPlugins).some(
+      (pluginId) =>
+        composerIds.has(pluginId) && !item.pluginContext?.[pluginId],
+    )
+  )
+    return { status: "rejected", reason: "blocked" };
+  const native = item.nativeOptions;
+  return await new Promise<ChatQueueFlushResult>((resolve) => {
+    let outcomeSettled = false;
+    const settleOutcome = (outcome: "complete" | "rejected" | "uncertain") => {
+      if (outcomeSettled) return;
+      outcomeSettled = true;
+      resolve(
+        outcome === "complete"
+          ? { status: "accepted" }
+          : outcome === "rejected"
+          ? { status: "rejected", reason: "blocked" }
+          : { status: "uncertain" },
+      );
+    };
+    const executionOptions = {
+      ...(item.pluginContext ? { pluginContext: item.pluginContext } : {}),
+      ...(item.bound || item.editMessageId
+        ? { delivery: "follow_up" as const }
+        : {}),
+      onOutcome: settleOutcome,
+    };
+    try {
+      if (item.editMessageId) {
+        const accepted = editAndResend(
+          item.editMessageId,
+          item.text,
+          target.agentId,
+          {
+            targetThreadId: target.threadId,
+            modelRef: native?.modelRef ?? item.modelRef,
+            mcpServers: native?.connectors
+              ? [...native.connectors]
+              : item.composerContext?.connectors,
+            knowledgeBaseIds: native?.knowledgeBaseIds
+              ? [...native.knowledgeBaseIds]
+              : item.composerContext?.knowledgeBaseIds,
+            targetAgentIds: native?.targetAgentIds
+              ? [...native.targetAgentIds]
+              : item.composerContext?.targetAgents,
+            composerContext: item.composerContext,
+            reasoningMode:
+              native?.reasoningMode ?? item.composerContext?.reasoningMode,
+            reasoningEffort:
+              native?.reasoningEffort ?? item.composerContext?.reasoningEffort,
+            conversationMode: native?.conversationMode,
+            hitlPolicy: native?.hitlPolicy,
+            executionOptions,
+          },
+        );
+        if (!accepted) {
+          outcomeSettled = true;
+          resolve({ status: "rejected", reason: "blocked" });
+        }
+      } else {
+        sendMessage(
+          item.text,
+          "",
+          target.agentId,
+          item.attachments,
+          target.threadId,
+          native?.modelRef ?? item.modelRef,
+          native?.connectors
+            ? [...native.connectors]
+            : item.composerContext?.connectors,
+          native?.knowledgeBaseIds
+            ? [...native.knowledgeBaseIds]
+            : item.composerContext?.knowledgeBaseIds,
+          native?.targetAgentIds
+            ? [...native.targetAgentIds]
+            : item.composerContext?.targetAgents,
+          item.composerContext,
+          native?.reasoningMode ?? item.composerContext?.reasoningMode,
+          native?.reasoningEffort ?? item.composerContext?.reasoningEffort,
+          native?.conversationMode,
+          native?.hitlPolicy,
+          executionOptions,
+        );
+      }
+    } catch {
+      outcomeSettled = true;
+      resolve({ status: "uncertain" });
+    }
+  });
+}
+
+export async function reclaimQueueItemIfCurrent(
+  id: string,
+  deps: {
+    getById: (id: string) => QueuedChatItem | null;
+    getOrigin: () => { agentId: string; threadId: string };
+    restore: (
+      selection: NonNullable<QueuedChatItem["pluginSelection"]>,
+    ) => Promise<void>;
+    commit: (item: QueuedChatItem) => boolean;
+    remove: (id: string) => void;
+  },
+): Promise<boolean> {
+  const item = deps.getById(id);
+  const origin = deps.getOrigin();
+  if (
+    !item ||
+    !isAuthSessionCurrent(item.authEpoch) ||
+    item.status === "sending" ||
+    item.target.agentId !== origin.agentId ||
+    item.target.threadId !== origin.threadId
+  )
+    return false;
+  try {
+    if (item.pluginSelection?.length) await deps.restore(item.pluginSelection);
+  } catch {
+    return false;
+  }
+  const latest = deps.getById(id);
+  const latestOrigin = deps.getOrigin();
+  if (
+    !latest ||
+    latest.status === "sending" ||
+    latest.authEpoch !== item.authEpoch ||
+    !isAuthSessionCurrent(item.authEpoch) ||
+    latestOrigin.agentId !== origin.agentId ||
+    latestOrigin.threadId !== origin.threadId ||
+    latest.target.agentId !== latestOrigin.agentId ||
+    latest.target.threadId !== latestOrigin.threadId ||
+    !deps.commit(latest)
+  )
+    return false;
+  deps.remove(id);
+  return true;
+}
+
+interface ChatComposerPluginState {
+  agentId: string | null;
+  readiness: ReturnType<typeof usePluginToolUis>["readiness"];
+  refresh: ReturnType<typeof usePluginToolUis>["refresh"];
+  generation: string;
+}
+
+export function ChatComposerTools(props: {
+  routeAgentId: string | null;
+  activeAgentId: string | null;
+  threadId: string | null;
+  locale: string;
+  theme: "light" | "dark";
+  timeZone: string;
+  children: (state: ChatComposerPluginState) => ReactNode;
+}) {
+  const {
+    routeAgentId,
+    activeAgentId,
+    threadId,
+    locale,
+    theme,
+    timeZone,
+    children,
+  } = props;
+  const agentId = routeAgentId || activeAgentId;
+  const pluginThreadId =
+    threadId && !isPendingThread(threadId) ? threadId : null;
+  const pluginUi = usePluginToolUis({ agentId, threadId: pluginThreadId });
+  return (
+    <>
+      <PluginReadinessNotice
+        readiness={pluginUi.readiness}
+        onRetry={() => void pluginUi.refresh()}
+      />
+      <PluginSurface
+        surface="composer"
+        location="chat"
+        context={{
+          agentId,
+          threadId: pluginThreadId,
+          locale,
+          theme,
+          generation: pluginUi.generation,
+          timeZone,
+          readiness: pluginUi.readiness,
+        }}
+      />
+      {children({
+        agentId,
+        readiness: pluginUi.readiness,
+        refresh: pluginUi.refresh,
+        generation: pluginUi.generation,
+      })}
+    </>
+  );
+}
+
 function ChatPageInner() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   prefetchVoiceConfig();
@@ -129,10 +455,7 @@ function ChatPageInner() {
     agentId?: string;
     threadId?: string;
   }>();
-  usePluginToolUis({
-    agentId: routeAgentId ?? null,
-    threadId: threadId ?? null,
-  });
+  const serverTimeZone = useServerTimezone();
   const isMobile = useIsMobile();
   const user = useCurrentUser();
   const { layoutMode } = useLayoutMode();
@@ -166,6 +489,16 @@ function ChatPageInner() {
   );
   // Imperative handle to push a new prefill into the already-mounted ChatInput.
   const chatInputRef = useRef<ChatInputHandle | null>(null);
+  const pluginReadinessRefreshRef = useRef<
+    ((target: PluginReadinessTarget) => Promise<PluginToolUiReadiness>) | null
+  >(null);
+  const preparedQueueRef = useRef<{
+    enqueue: (
+      target: NativeTarget,
+      input: EnqueueChatItemInput,
+    ) => SubmitResult;
+    flush: (target: NativeTarget) => void;
+  } | null>(null);
 
   // Clear the router state after consuming prefillInput so it doesn't persist
   // on subsequent visits or page refreshes.
@@ -194,6 +527,8 @@ function ChatPageInner() {
   }, [location.state, location.pathname, navigate]);
 
   const activeThreadId = threadId || null;
+  const toolUiThreadId =
+    activeThreadId && !isPendingThread(activeThreadId) ? activeThreadId : null;
 
   const {
     activeAgentId,
@@ -203,6 +538,14 @@ function ChatPageInner() {
     loading: agentsLoading,
   } = useAgent();
   const resolvedAgentId = routeAgentId || activeAgentId;
+  const queueOriginRef = useRef({
+    agentId: resolvedAgentId ?? "",
+    threadId: activeThreadId ?? "",
+  });
+  queueOriginRef.current = {
+    agentId: resolvedAgentId ?? "",
+    threadId: activeThreadId ?? "",
+  };
   const hitlEnabled = useHitlEnabled(resolvedAgentId);
   const activeAgent = useMemo(
     () => agents.find((a) => a.agent_id === resolvedAgentId) ?? null,
@@ -404,6 +747,7 @@ function ChatPageInner() {
     dockOpen,
     dockMode,
     openTabs,
+    toolScopeIdentity,
     activeTabId,
     panelSizes: dockPanelSizes,
     isResizing: dockIsResizing,
@@ -420,10 +764,11 @@ function ChatPageInner() {
     toggleWorkspacePanel,
     toggleTerminalPanel,
     openToolUiTab,
+    registerToolUiBinding,
     focusToolUiTab,
     closeTab: closeDockTab,
     setActiveTab: setDockActiveTab,
-  } = useChatDockPanel(isMobile, resolvedAgentId);
+  } = useChatDockPanel(isMobile, resolvedAgentId, toolUiThreadId);
 
   const chromeCheckInFlightRef = useRef(false);
   const bridgeConnectionId =
@@ -707,7 +1052,7 @@ function ChatPageInner() {
     [chatSkills, chatConnectors, chatKnowledgeBases, chatAgentOptions],
   );
 
-  const { handleSend } = useChatSend({
+  const { handleSend, beginSubmission } = useChatSend({
     resolvedAgentId,
     activeThreadId,
     sessions,
@@ -722,7 +1067,17 @@ function ChatPageInner() {
     defaultModel: activeAgent?.default_model ?? null,
     sendMessage,
     createSession,
+    refreshPluginReadiness: (target) =>
+      pluginReadinessRefreshRef.current?.(target) ??
+      Promise.resolve({ status: "loading" }),
+    enqueuePrepared: (target, item) =>
+      preparedQueueRef.current?.enqueue(target, item) ?? {
+        status: "rejected",
+        reason: "blocked",
+      },
+    requestPreparedFlush: (target) => preparedQueueRef.current?.flush(target),
     renameSession,
+    markInitialNavDone,
     onAutoRecordingStarted: useCallback((recordingId: string) => {
       setBrowserRecording(true);
       setBrowserRecordingId(recordingId);
@@ -746,47 +1101,27 @@ function ChatPageInner() {
   // An open ask pause must become respond-resume (not a new turn); any other
   // pending HITL must not start a turn that would cancel the interrupt.
   const wrappedHandleSend = useCallback(
-    (
+    async (
       text: string,
       attachments?: ChatAttachment[],
       overrides?: ChatSendOverrides,
-    ) => {
-      if (interceptUserMessage(text)) {
-        // The workflow intercepted the message — don't send it to the agent
-        return;
-      }
-      const targetThreadId = overrides?.threadId ?? activeThreadId ?? undefined;
-      const ask =
-        targetThreadId && targetThreadId === activeThreadId
-          ? pendingAsk
-          : targetThreadId
-          ? findPendingAsk(chatStore.getSnapshot(targetThreadId).messages)
-          : pendingAsk;
-      if (ask) {
-        const trimmed = text.trim();
-        if (attachments && attachments.length > 0) {
-          antMessage.warning(t("chat.ask.useCardForAttachments"));
-          return;
-        }
-        if (!trimmed) return;
-        resumeHitl(
-          ask.actions.map(() => ({ type: "respond", message: trimmed })),
-          targetThreadId,
-        );
-        return;
-      }
-      const blocked =
-        targetThreadId && targetThreadId === activeThreadId
-          ? hasPendingHitlPause
-          : targetThreadId
-          ? hasPendingHitl(chatStore.getSnapshot(targetThreadId).messages)
-          : hasPendingHitlPause;
-      if (blocked) {
-        antMessage.warning(t("chat.hitl.finishPendingFirst"));
-        return;
-      }
-      handleSend(text, attachments, overrides);
-    },
+    ) =>
+      routeGuardedChatSend({
+        text,
+        attachments,
+        overrides,
+        activeThreadId,
+        pendingAsk,
+        hasPendingHitlPause,
+        findPendingAskForThread: (threadId) =>
+          findPendingAsk(chatStore.getSnapshot(threadId).messages),
+        hasPendingHitlForThread: (threadId) =>
+          hasPendingHitl(chatStore.getSnapshot(threadId).messages),
+        interceptUserMessage,
+        resumeHitl,
+        handleSend,
+        warn: (key) => antMessage.warning(t(key)),
+      }),
     [
       interceptUserMessage,
       handleSend,
@@ -799,30 +1134,26 @@ function ChatPageInner() {
   );
 
   const flushQueuedItem = useCallback(
-    (item: QueuedChatItem, ctx: ChatQueueFlushContext): boolean => {
-      if (!ctx.threadId) {
-        antMessage.error(t("chat.queue.flushFailed"));
-        return false;
-      }
-      // Bypass skill-recording intercept — queued text must not be swallowed
-      // after it has already left the queue. Target the queued thread/agent so
-      // background streamEnd flushes do not send into the active session.
-      const ok = handleSend(item.text, item.attachments, {
-        composerContext: item.composerContext,
-        modelRef: item.modelRef,
-        selectedModel: item.composerContext?.model ?? item.modelRef ?? null,
-        selectedConnectors: item.composerContext?.connectors,
-        selectedKnowledgeBaseIds: item.composerContext?.knowledgeBaseIds,
-        selectedTargetAgents: item.composerContext?.targetAgents,
+    async (item: QueuedChatItem, ctx: ChatQueueFlushContext) => {
+      const target = item.target ?? {
+        agentId: ctx.agentId,
         threadId: ctx.threadId,
-        agentId: ctx.agentId || undefined,
-      });
-      if (!ok) {
+      };
+      if (!target.threadId) {
         antMessage.error(t("chat.queue.flushFailed"));
+        return { status: "rejected" as const, reason: "blocked" as const };
       }
-      return ok;
+      const refresh = pluginReadinessRefreshRef.current;
+      if (!refresh) return { status: "rejected", reason: "blocked" } as const;
+      return await dispatchPreparedQueueItem(
+        item,
+        target,
+        refresh,
+        sendMessage,
+        editAndResend,
+      );
     },
-    [handleSend, t],
+    [sendMessage, editAndResend, t],
   );
 
   const membersStillTalking =
@@ -831,22 +1162,17 @@ function ChatPageInner() {
       (id) => id.trim() && id !== (activeAgent?.agent_id ?? ""),
     );
 
-  const shouldDeferQueueFlush = useCallback(
-    (threadId: string) => {
-      const snap = chatStore.getSnapshot(threadId);
-      if (hasPendingHitl(snap.messages)) return true;
-      if (!isTeamChat) return false;
-      const hostId = activeAgent?.agent_id ?? "";
-      return snap.liveSpeakers.some((id) => id.trim() && id !== hostId);
-    },
-    [activeAgent?.agent_id, isTeamChat],
-  );
+  const shouldDeferQueueFlush = useCallback((threadId: string) => {
+    return chatStore.isSessionBusyForTurnDispatch(threadId);
+  }, []);
 
   const {
     items: queuedItems,
-    enqueue: enqueueQueued,
-    remove: removeQueued,
-    reclaim: reclaimQueued,
+    allItems: allQueuedItems,
+    enqueueForTarget: enqueueQueuedForTarget,
+    requestFlush: requestQueuedFlush,
+    removeById: removeQueued,
+    getById: getQueuedById,
     clear: clearQueued,
   } = useChatMessageQueue({
     agentId: resolvedAgentId,
@@ -855,6 +1181,22 @@ function ChatPageInner() {
     onFlush: flushQueuedItem,
     shouldDeferFlush: shouldDeferQueueFlush,
   });
+  preparedQueueRef.current = {
+    enqueue: enqueueQueuedForTarget,
+    flush: requestQueuedFlush,
+  };
+
+  const reclaimPreparedQueueItem = useCallback(
+    (id: string, commit: (item: QueuedChatItem) => boolean) =>
+      reclaimQueueItemIfCurrent(id, {
+        getById: getQueuedById,
+        getOrigin: () => queueOriginRef.current,
+        restore: restoreComposerSelections,
+        commit,
+        remove: removeQueued,
+      }),
+    [getQueuedById, removeQueued],
+  );
 
   // While streaming, Enter/Send parks a local chip; ↑ Steer on the chip row
   // commits sendSteerWhileBusy. The click always acts: the
@@ -864,7 +1206,16 @@ function ChatPageInner() {
     (id: string) => {
       const key = activeThreadId || "";
       const item = queuedItems.find((q) => q.id === id);
-      if (!item || !key) return;
+      if (!item || !key || item.status !== "queued") return;
+      if (
+        requestBoundQueueItemFlush(
+          item.bound || Boolean(item.pluginContext),
+          item.target,
+          requestQueuedFlush,
+        )
+      ) {
+        return;
+      }
       const turnId = activeTurnId || chatStore.getActiveTurnId(key) || "";
       const result = chatStore.sendSteerWhileBusy(key, item.text, {
         expectedTurnId: turnId || undefined,
@@ -881,6 +1232,7 @@ function ChatPageInner() {
       activeTurnId,
       queuedItems,
       removeQueued,
+      requestQueuedFlush,
       wrappedHandleSend,
     ],
   );
@@ -900,7 +1252,23 @@ function ChatPageInner() {
   // Committed steers live in the transcript (optimistic row settled by
   // server frames) — the chip panel holds only uncommitted local drafts
   // (the queue row settles on commit).
-  const displayQueuedItems = queuedItems;
+  const displayQueuedItems = useMemo(() => {
+    const currentIds = new Set(queuedItems.map((item) => item.id));
+    const originThreadId =
+      activeThreadId && !isPendingThread(activeThreadId)
+        ? activeThreadId
+        : null;
+    return [
+      ...queuedItems,
+      ...allQueuedItems.filter(
+        (item) =>
+          !currentIds.has(item.id) &&
+          isAuthSessionCurrent(item.authEpoch) &&
+          item.displayOrigin?.agentId === resolvedAgentId &&
+          item.displayOrigin.threadId === originThreadId,
+      ),
+    ];
+  }, [queuedItems, allQueuedItems, activeThreadId, resolvedAgentId]);
 
   const {
     handleNewChat: startNewChat,
@@ -1148,15 +1516,24 @@ function ChatPageInner() {
   // Edit user message: truncate history from that message onwards, replace
   // its content, and re-send — mirrors Claude / ChatGPT "edit message" behaviour.
   const handleEditUserMessage = useCallback(
-    (messageId: string, newText: string) => {
+    async (messageId: string, newText: string) => {
       if (!activeThreadId) return;
       if (hasPendingHitlPause) {
         antMessage.warning(t("chat.hitl.finishPendingFirst"));
         return;
       }
-      editAndResend(messageId, newText, "", resolvedAgentId ?? "");
+      const agentId = resolvedAgentId ?? "";
+      await handleSend(newText, undefined, {
+        intent: "edit",
+        editMessageId: messageId,
+        threadId: activeThreadId,
+        agentId,
+        refreshPluginReadiness: (target) =>
+          pluginReadinessRefreshRef.current?.(target) ??
+          Promise.resolve({ status: "loading" }),
+      });
     },
-    [activeThreadId, editAndResend, resolvedAgentId, hasPendingHitlPause, t],
+    [activeThreadId, handleSend, resolvedAgentId, hasPendingHitlPause, t],
   );
 
   const [forking, setForking] = useState(false);
@@ -1362,9 +1739,13 @@ function ChatPageInner() {
         dockOpen={dockOpen}
         openTabs={openTabs}
         activeTabId={activeTabId}
+        resolvedAgentId={resolvedAgentId}
+        activeThreadId={toolUiThreadId}
+        scopeIdentity={toolScopeIdentity}
         openToolUiPanel={openToolUiTab}
         closeToolUiPanel={closeToolUiPanel}
         focusToolUiPanel={focusToolUiTab}
+        registerToolUiBinding={registerToolUiBinding}
       >
         {chatHistoryRail
           ? createPortal(chatSidebarPanel, chatHistoryRail)
@@ -1824,63 +2205,118 @@ function ChatPageInner() {
                 </div>
               </div>
             ) : null}
-            <ChatInput
-              ref={chatInputRef}
-              onSend={wrappedHandleSend}
-              onQueue={enqueueQueued}
-              queuedItems={displayQueuedItems}
-              onRemoveQueued={removeQueued}
-              onReclaimQueued={reclaimQueued}
-              onSteerQueued={handleSteerQueued}
-              onCancel={cancelStream}
-              onNewChat={handleNewChat}
-              isStreaming={isStreaming}
-              holdSend={membersStillTalking}
-              isTeam={isTeamChat}
-              disabled={!agentChatReady || noAgents || memoryMaintBlocking}
-              initialText={prefillInputRef.current}
-              onComposerCleared={() => {
-                prefillInputRef.current = "";
-              }}
-              availableModels={availableModels}
-              selectedModel={selectedModel}
-              onModelChange={setSelectedModel}
-              reasoningMode={reasoningMode}
-              reasoningEffort={reasoningEffort}
-              onReasoningChange={handleReasoningChange}
-              conversationMode={conversationMode}
-              onConversationModeChange={handleConversationModeChange}
-              hitlPolicy={hitlPolicy}
-              onHitlPolicyChange={
-                hitlEnabled ? handleComposerHitlPolicyChange : undefined
-              }
-              availableConnectors={isTeamChat ? undefined : chatConnectors}
-              selectedConnectors={isTeamChat ? [] : selectedConnectors}
-              onConnectorsChange={
-                isTeamChat ? undefined : handleConnectorsChange
-              }
-              availableKnowledgeBases={
-                isTeamChat ? undefined : chatKnowledgeBases
-              }
-              selectedKnowledgeBaseIds={
-                isTeamChat ? [] : selectedKnowledgeBaseIds
-              }
-              onKnowledgeBaseIdsChange={
-                isTeamChat ? undefined : handleKnowledgeBaseIdsChange
-              }
-              availableSkills={isTeamChat ? undefined : chatSkills}
-              availableAgents={chatAgentOptions}
-              availableExperts={
-                isTeamChat ? teamExpertOptions : chatAgentOptionsPickable
-              }
-              availableSubagents={isTeamChat ? undefined : chatSubagents}
-              agentId={resolvedAgentId}
+            <ChatComposerTools
+              routeAgentId={routeAgentId ?? null}
+              activeAgentId={activeAgentId}
               threadId={activeThreadId}
-              defaultModel={activeAgent?.default_model ?? null}
-              contextUsedTokens={contextUsedTokens}
-              contextMaxTokens={contextMaxTokens}
-              decisionSaved={decisionSaved}
-            />
+              locale={i18n.language || "en"}
+              theme={
+                document.documentElement.getAttribute("data-theme") ===
+                  "dark" || document.documentElement.classList.contains("dark")
+                  ? "dark"
+                  : "light"
+              }
+              timeZone={serverTimeZone}
+            >
+              {({
+                agentId: composerAgentId,
+                refresh: refreshPluginReadiness,
+              }) => {
+                pluginReadinessRefreshRef.current = refreshPluginReadiness;
+                return (
+                  <ChatInput
+                    ref={chatInputRef}
+                    onAcceptedTarget={(target) =>
+                      navigate(`/chat/${target.agentId}/${target.threadId}`, {
+                        replace: true,
+                      })
+                    }
+                    beginSubmission={beginSubmission}
+                    onSend={(text, attachments, submissionLease) =>
+                      wrappedHandleSend(text, attachments, {
+                        refreshPluginReadiness,
+                        submissionLease,
+                      })
+                    }
+                    onQueue={(item, submissionLease) =>
+                      wrappedHandleSend(item.text, item.attachments, {
+                        queueIntent: true,
+                        refreshPluginReadiness,
+                        submissionLease,
+                      })
+                    }
+                    queuedItems={displayQueuedItems}
+                    onRemoveQueued={removeQueued}
+                    onReclaimQueued={(id, commit, submissionLease) => {
+                      if (submissionLease && !submissionLease.isCurrent())
+                        return Promise.resolve(false);
+                      return reclaimPreparedQueueItem(
+                        id,
+                        (item) =>
+                          (!submissionLease || submissionLease.isCurrent()) &&
+                          commit(item),
+                      );
+                    }}
+                    onSteerQueued={handleSteerQueued}
+                    onOpenQueuedTarget={(target) =>
+                      navigate(`/chat/${target.agentId}/${target.threadId}`)
+                    }
+                    onCancel={cancelStream}
+                    onNewChat={handleNewChat}
+                    isStreaming={isStreaming}
+                    holdSend={membersStillTalking}
+                    isTeam={isTeamChat}
+                    disabled={
+                      !agentChatReady || noAgents || memoryMaintBlocking
+                    }
+                    initialText={prefillInputRef.current}
+                    onComposerCleared={() => {
+                      prefillInputRef.current = "";
+                    }}
+                    availableModels={availableModels}
+                    selectedModel={selectedModel}
+                    onModelChange={setSelectedModel}
+                    reasoningMode={reasoningMode}
+                    reasoningEffort={reasoningEffort}
+                    onReasoningChange={handleReasoningChange}
+                    conversationMode={conversationMode}
+                    onConversationModeChange={handleConversationModeChange}
+                    hitlPolicy={hitlPolicy}
+                    onHitlPolicyChange={
+                      hitlEnabled ? handleComposerHitlPolicyChange : undefined
+                    }
+                    availableConnectors={
+                      isTeamChat ? undefined : chatConnectors
+                    }
+                    selectedConnectors={isTeamChat ? [] : selectedConnectors}
+                    onConnectorsChange={
+                      isTeamChat ? undefined : handleConnectorsChange
+                    }
+                    availableKnowledgeBases={
+                      isTeamChat ? undefined : chatKnowledgeBases
+                    }
+                    selectedKnowledgeBaseIds={
+                      isTeamChat ? [] : selectedKnowledgeBaseIds
+                    }
+                    onKnowledgeBaseIdsChange={
+                      isTeamChat ? undefined : handleKnowledgeBaseIdsChange
+                    }
+                    availableSkills={isTeamChat ? undefined : chatSkills}
+                    availableAgents={chatAgentOptions}
+                    availableExperts={
+                      isTeamChat ? teamExpertOptions : chatAgentOptionsPickable
+                    }
+                    availableSubagents={isTeamChat ? undefined : chatSubagents}
+                    agentId={composerAgentId}
+                    threadId={activeThreadId}
+                    defaultModel={activeAgent?.default_model ?? null}
+                    contextUsedTokens={contextUsedTokens}
+                    contextMaxTokens={contextMaxTokens}
+                    decisionSaved={decisionSaved}
+                  />
+                );
+              }}
+            </ChatComposerTools>
           </div>
 
           <ChatDockPanels

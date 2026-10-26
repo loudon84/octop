@@ -6,6 +6,8 @@ import shutil
 
 import click
 
+from octop.i18n import DEFAULT_LOCALE, tr
+
 
 @click.command("init")
 @click.option(
@@ -27,6 +29,12 @@ import click
     help="Optional display name for the admin user.",
 )
 @click.option(
+    "--admin-email",
+    envvar="OCTOP_ADMIN_EMAIL",
+    default=None,
+    help=tr("cli.init.admin_email_help", "en"),
+)
+@click.option(
     "--force",
     is_flag=True,
     default=False,
@@ -43,6 +51,7 @@ def init(
     admin_username: str | None,
     admin_password: str | None,
     admin_display_name: str | None,
+    admin_email: str | None,
     force: bool,
     non_interactive: bool,
 ) -> None:
@@ -54,6 +63,10 @@ def init(
     from octop.infra.db.repos.users import UserRepo
     from octop.infra.errors import OctopError
     from octop.infra.users.password import hash_password, validate_password_policy
+    from octop.infra.users.registration_policy import (
+        load_registration_policy,
+        validate_registration_email,
+    )
     from octop.infra.utils.env_file import apply_env_file, env_file_path
     from octop.infra.utils.paths import PathLayout
 
@@ -92,6 +105,7 @@ def init(
         username = admin_username
         password = admin_password
         display_name = admin_display_name
+        email = admin_email
 
         if not non_interactive:
             from octop.cli.support import prompts as _prompts
@@ -119,11 +133,25 @@ def init(
             # 避免管理员 INSERT 撞 UNIQUE(username) 直接崩溃。
             click.echo(f"  admin user '{username}' already exists, skipping.")
         else:
+            from octop.infra.db.services import build_shared_services
+
+            services = build_shared_services(db=db, paths=paths, config=config)
+            registration_policy = load_registration_policy(services.settings_repo)
+            if email is None and registration_policy.email_required and not non_interactive:
+                from octop.cli.support import prompts as _prompts
+
+                email = _prompts.text(tr("cli.init.admin_email", "en"))
+            try:
+                normalized_email = validate_registration_email(email, registration_policy)
+            except OctopError as exc:
+                click.echo(f"error: {tr(f'errors.{exc.code.value}', DEFAULT_LOCALE)}", err=True)
+                raise SystemExit(1) from None
             user_repo.create(
                 username=username,
                 password_hash=hash_password(password or ""),
                 role="admin",
                 display_name=display_name,
+                email=normalized_email,
             )
     finally:
         db.close()

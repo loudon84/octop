@@ -8,6 +8,8 @@ import {
 } from "./localePrefs";
 
 export type { UiLocale };
+
+let applicationSequence = 0;
 export {
   detectBrowserLocale,
   normalizeUiLocale,
@@ -21,13 +23,19 @@ export {
 /** Apply server-stored locale to the dashboard i18n instance. */
 export async function applyUserLocale(
   raw: string | null | undefined,
+  options: { isCurrent?: () => boolean } = {},
 ): Promise<UiLocale> {
   const lang = normalizeUiLocale(raw);
-  storeUiLocale(lang);
+  const sequence = ++applicationSequence;
+  const isCurrent = () =>
+    sequence === applicationSequence && (options.isCurrent?.() ?? true);
   await ensureLocaleBundle(lang);
+  if (!isCurrent()) return lang;
+  storeUiLocale(lang);
   if (i18n.language !== lang) {
     await i18n.changeLanguage(lang);
   }
+  if (!isCurrent()) return lang;
   syncDocumentLang(lang);
   return lang;
 }
@@ -35,11 +43,14 @@ export async function applyUserLocale(
 /** Guest surfaces (login / post-logout): stored preference or browser locale. */
 export async function applyGuestLocale(): Promise<UiLocale> {
   const lang = resolveInitialLocale();
-  storeUiLocale(lang);
+  const sequence = ++applicationSequence;
   await ensureLocaleBundle(lang);
+  if (sequence !== applicationSequence) return lang;
+  storeUiLocale(lang);
   if (i18n.language !== lang) {
     await i18n.changeLanguage(lang);
   }
+  if (sequence !== applicationSequence) return lang;
   syncDocumentLang(lang);
   return lang;
 }

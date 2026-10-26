@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ try:
 except ImportError:  # pragma: no cover - optional PostgreSQL driver
     pg_errors = None  # type: ignore[assignment]
 
+from octop.i18n.domains.errors import error_message
 from octop.infra.db.repos._base import UNSET
 from octop.infra.db.repos.audit import ACTOR_ADMIN
 from octop.infra.db.repos.users import UserRepo
@@ -34,6 +36,11 @@ from octop.infra.users.preferences import (
     merge_model_preferences_json,
     merge_preferences_json,
     validate_remote_browser_bookmarks,
+)
+from octop.infra.users.registration_policy import (
+    is_email_unique_violation,
+    load_registration_policy,
+    validate_registration_email,
 )
 from octop.infra.utils.locale import normalize_locale
 
@@ -86,12 +93,27 @@ class UserManager:
     User management only — agent lifecycle is now handled by AgentManager.
     """
 
-    def __init__(self, services: SharedServices):
+    def __init__(
+        self,
+        services: SharedServices,
+        *,
+        user_created_notifier: Callable[[], None] | None = None,
+    ):
         self._services = services
+        self._user_created_notifier = user_created_notifier
         self._users: dict[str, User] = {}
         self._lock = asyncio.Lock()
         self._login_max_attempts = max(1, services.config.login_max_attempts)
         self._login_lockout_seconds = max(60, services.config.login_lockout_seconds)
+
+    def notify_user_created(self) -> None:
+        """Best-effort wake for consumers that reconcile newly created users."""
+        if self._user_created_notifier is None:
+            return
+        try:
+            self._user_created_notifier()
+        except Exception:
+            logger.warning("user-created notifier failed")
 
     def replace_services(self, services: SharedServices) -> None:
         """Point at a new SharedServices (control-plane DB rebind during setup)."""
@@ -140,7 +162,11 @@ class UserManager:
             keys = validate_permission_keys(permissions or [])
         except ValueError as exc:
             raise OctopError(ErrorCode.FORBIDDEN, str(exc), status=400) from exc
-        normalized_email = parse_optional_email(email)
+        loop = asyncio.get_running_loop()
+        policy = await loop.run_in_executor(
+            None, load_registration_policy, self._services.settings_repo
+        )
+        normalized_email = validate_registration_email(email, policy)
         role_id = str(role)
         async with self._lock:
             if self._services.user_repo.get_by_username(username) is not None:
@@ -154,7 +180,9 @@ class UserManager:
             ):
                 raise OctopError(
                     ErrorCode.EMAIL_TAKEN,
-                    f"email {normalized_email!r} already exists",
+                    error_message("EMAIL_TAKEN")
+                    if policy.email_required
+                    else f"email {normalized_email!r} already exists",
                 )
             try:
                 uid = self._services.user_repo.create(
@@ -168,10 +196,12 @@ class UserManager:
                     role_name=role_name,
                 )
             except Exception as exc:
-                if _is_unique_violation(exc) and normalized_email is not None:
+                if is_email_unique_violation(exc) and normalized_email is not None:
                     raise OctopError(
                         ErrorCode.EMAIL_TAKEN,
-                        f"email {normalized_email!r} already exists",
+                        error_message("EMAIL_TAKEN")
+                        if policy.email_required
+                        else f"email {normalized_email!r} already exists",
                     ) from exc
                 raise
             user = User(
@@ -183,6 +213,7 @@ class UserManager:
                 permissions=keys,
             )
             self._users[username] = user
+            self.notify_user_created()
             self._services.audit_repo.write(actor=username, action="user.create", target=username)
             return user
 
@@ -202,16 +233,23 @@ class UserManager:
     ) -> User:
         from octop.infra.users.invites import InviteService
 
+        loop = asyncio.get_running_loop()
+        policy = await loop.run_in_executor(
+            None, load_registration_policy, self._services.settings_repo
+        )
         async with self._lock:
-            return InviteService(self._services).redeem(
+            user = InviteService(self._services).redeem(
                 code=code,
                 username=username,
                 password=password,
                 display_name=display_name,
                 locale=locale,
                 email=email,
+                registration_policy=policy,
                 register_user=self.register_cached_user,
             )
+            self.notify_user_created()
+            return user
 
     def get(self, username: str) -> User | None:
         return self._users.get(username)
@@ -251,6 +289,18 @@ class UserManager:
             display_name = _claim_display_name(claims)
 
             if row is None:
+                loop = asyncio.get_running_loop()
+                registration_policy = await loop.run_in_executor(
+                    None, load_registration_policy, self._services.settings_repo
+                )
+                registration_email = (
+                    validate_registration_email(
+                        claims.get("email") if isinstance(claims.get("email"), str) else None,
+                        registration_policy,
+                    )
+                    if registration_policy.email_required
+                    else email
+                )
                 from octop.infra.db.repos.user_roles import seeded_user_role_assignment
 
                 assignment = seeded_user_role_assignment(self._services.db)
@@ -259,11 +309,14 @@ class UserManager:
                 sso_permissions = list(assignment[2]) if assignment else []
                 sso_policies = list(assignment[3]) if assignment else []
                 for attempt in range(3):
-                    if (
-                        email is not None
-                        and self._services.user_repo.get_by_email(email) is not None
-                    ):
-                        email = None
+                    if registration_email is not None:
+                        email_owner = self._services.user_repo.get_by_email(registration_email)
+                        if email_owner is not None:
+                            if registration_policy.email_required:
+                                raise OctopError(
+                                    ErrorCode.EMAIL_TAKEN, error_message("EMAIL_TAKEN")
+                                )
+                            registration_email = None
                     username = allocate_username(self._services.user_repo, claims, subject)
                     try:
                         uid = self._services.user_repo.create(
@@ -271,7 +324,7 @@ class UserManager:
                             password_hash=None,
                             role=sso_role_id,
                             display_name=display_name,
-                            email=email,
+                            email=registration_email,
                             sso_provider_id=provider_id,
                             sso_subject=subject,
                             permissions=sso_permissions,
@@ -288,6 +341,20 @@ class UserManager:
                         row = self._services.user_repo.get_by_sso(provider_id, subject)
                         if row is not None:
                             break
+                        if (
+                            registration_policy.email_required
+                            and registration_email is not None
+                            and is_email_unique_violation(exc)
+                        ):
+                            email_owner = await loop.run_in_executor(
+                                None,
+                                self._services.user_repo.get_by_email,
+                                registration_email,
+                            )
+                            if email_owner is not None:
+                                raise OctopError(
+                                    ErrorCode.EMAIL_TAKEN, error_message("EMAIL_TAKEN")
+                                ) from exc
                         if attempt == 2:
                             raise
                         await asyncio.sleep(0.01 * (attempt + 1))
@@ -300,6 +367,7 @@ class UserManager:
                             permissions=list(sso_permissions),
                         )
                         self._users[username] = user
+                        self.notify_user_created()
                         self._services.audit_repo.write(
                             actor=username, action="user.sso_create", target=username
                         )
@@ -370,6 +438,8 @@ class UserManager:
                 row.id,
                 email=email,
             )
+            if owner is None:
+                self.notify_user_created()
             self._services.audit_repo.write(
                 actor=row.username, action="user.sso_bind", target=row.username
             )

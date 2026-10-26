@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
+import functools
 import mimetypes
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 
 from octop.api.common.agent import assert_agent_owner as _assert_agent_owner
 from octop.api.deps import current_user, get_server, require_permission
-from octop.infra.agents.plugins.manager import PluginManager
+from octop.api.routers import plugin_actions
+from octop.infra.agents.plugins.manager import PluginManager, mutate
 from octop.infra.agents.plugins.plugin_tool_defaults import (
     agent_plugin_enabled,
     merge_plugins_enabled_settings,
@@ -24,6 +25,7 @@ from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.server import OctopServer
 
 router = APIRouter(prefix="/plugins", tags=["plugins"])
+router.include_router(plugin_actions.router)
 
 _UI_CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
@@ -96,6 +98,13 @@ def _plugin_manager(server: OctopServer) -> PluginManager:
     return mgr
 
 
+async def _run_manager(manager: PluginManager, function: Any, /, *args: Any, **kwargs: Any) -> Any:
+    return await mutate(
+        functools.partial(function, *args, **kwargs),
+        manager=manager,
+    )
+
+
 @router.get("", summary="List installed plugins")
 async def list_plugins(
     server: OctopServer = Depends(get_server),
@@ -115,7 +124,7 @@ async def reload_plugins(
     disk install does not update the running server until reload or restart.
     """
     mgr = _plugin_manager(server)
-    loaded = mgr.load_installed(install_deps=True)
+    loaded = await _run_manager(mgr, mgr.load_installed, install_deps=True)
     if server.app_runtime is not None:
         await server.refresh_plugin_channels()
         await server.app_runtime.agent_registry.reload_all()
@@ -140,7 +149,7 @@ async def install_plugin(
 ) -> dict[str, Any]:
     mgr = _plugin_manager(server)
     try:
-        loaded = mgr.install_url(body.url)
+        loaded = await _run_manager(mgr, mgr.install_url, body.url)
     except OctopError:
         raise
     except Exception as exc:
@@ -150,7 +159,7 @@ async def install_plugin(
             details={"reason": str(exc)},
         ) from exc
     if server.app_runtime is not None:
-        mgr.load_installed(install_deps=False)
+        await _run_manager(mgr, mgr.load_installed, install_deps=False)
         await server.refresh_plugin_channels()
         await server.app_runtime.agent_registry.reload_all()
     return {
@@ -176,14 +185,18 @@ async def upload_plugin(
     raw = await file.read()
     if not raw:
         raise OctopError(ErrorCode.PLUGIN_INVALID_ARCHIVE, "empty plugin archive")
-    try:
+
+    def install_uploaded() -> Any:
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
             tmp.write(raw)
             tmp_path = Path(tmp.name)
         try:
-            loaded = mgr.install_archive(tmp_path, force=force)
+            return mgr.install_archive(tmp_path, force=force)
         finally:
             tmp_path.unlink(missing_ok=True)
+
+    try:
+        loaded = await _run_manager(mgr, install_uploaded)
     except OctopError:
         raise
     except Exception as exc:
@@ -193,7 +206,7 @@ async def upload_plugin(
             details={"reason": str(exc)},
         ) from exc
     if server.app_runtime is not None:
-        mgr.load_installed(install_deps=False)
+        await _run_manager(mgr, mgr.load_installed, install_deps=False)
         await server.refresh_plugin_channels()
         await server.app_runtime.agent_registry.reload_all()
     return {
@@ -225,12 +238,8 @@ async def install_market_plugin(
 ) -> dict[str, Any]:
     """Copy a catalog plugin into ``~/.octop/plugins`` (future: download ZIP)."""
     mgr = _plugin_manager(server)
-    loop = asyncio.get_running_loop()
     try:
-        loaded = await loop.run_in_executor(
-            None,
-            lambda: mgr.install_from_market(plugin_id, force=force),
-        )
+        loaded = await _run_manager(mgr, mgr.install_from_market, plugin_id, force=force)
     except OctopError:
         raise
     except Exception as exc:
@@ -291,11 +300,11 @@ async def patch_plugin(
     skills / hooks are unavailable to all agents until re-enabled.
     """
     mgr = _plugin_manager(server)
-    item = mgr.set_enabled(plugin_id, body.enabled)
+    item = await _run_manager(mgr, mgr.set_enabled, plugin_id, body.enabled)
     if server.app_runtime is not None:
         await server.refresh_plugin_channels()
         await server.app_runtime.agent_registry.reload_all()
-    return item
+    return cast(dict[str, Any], item)
 
 
 @router.delete("/{plugin_id}", summary="Uninstall plugin (admin)")
@@ -304,7 +313,8 @@ async def uninstall_plugin(
     server: OctopServer = Depends(get_server),
     _user: Any = Depends(require_permission("plugins")),
 ) -> dict[str, str]:
-    _plugin_manager(server).uninstall(plugin_id)
+    mgr = _plugin_manager(server)
+    await _run_manager(mgr, mgr.uninstall, plugin_id)
     if server.app_runtime is not None:
         await server.refresh_plugin_channels()
         await server.app_runtime.agent_registry.reload_all()

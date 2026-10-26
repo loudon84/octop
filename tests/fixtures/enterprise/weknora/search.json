@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": [
+    {
+      "id": "result-synthetic-1",
+      "knowledge_id": "knowledge-synthetic-1",
+      "knowledge_base_id": "kb-synthetic-a",
+      "content": "Synthetic retrieved content.",
+      "chunk_index": 0,
+      "score": 0.91,
+      "source_locators": {"page": "p. 2"}
+    }
+  ],
+  "meta": {"fixture": "synthetic"}
+}

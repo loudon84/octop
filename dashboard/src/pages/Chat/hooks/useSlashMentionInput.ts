@@ -59,11 +59,10 @@ interface UseSlashMentionInputParams {
   agentId?: string | null;
   selectedConnectors: string[];
   onConnectorsChange?: (names: string[]) => void;
-  onSend: (text: string) => void;
   onNewChat: () => void;
   onCancel: () => void;
   isStreaming: boolean;
-  onSubmitRef: React.MutableRefObject<() => void>;
+  onSubmitRef: React.MutableRefObject<(textOverride?: string) => void>;
   /** When false, Enter inserts a newline; send only via button (mobile). */
   enterToSend?: boolean;
 }
@@ -82,7 +81,6 @@ export function useSlashMentionInput({
   agentId,
   selectedConnectors,
   onConnectorsChange,
-  onSend,
   onNewChat,
   onCancel,
   isStreaming: _isStreaming,
@@ -271,11 +269,11 @@ export function useSlashMentionInput({
         setText(slashCommandPrefillText(item.spec));
         focusTextareaEnd();
       } else {
-        onSend(item.command);
-        setText("");
+        setText(item.command);
+        onSubmitRef.current(item.command);
       }
     },
-    [onSend, onNewChat, onCancel, setText, focusTextareaEnd],
+    [onNewChat, onCancel, setText, focusTextareaEnd, onSubmitRef],
   );
 
   const matchSlashCommand = useCallback(

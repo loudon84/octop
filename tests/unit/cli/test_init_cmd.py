@@ -192,3 +192,79 @@ def test_init_env_vars_supply_credentials(fake_home: Path, monkeypatch: pytest.M
     paths = PathLayout(fake_home / ".octop")
     repo = UserRepo(SqlitePool(paths.db))
     assert repo.get_by_username("fromenv") is not None
+
+
+def test_init_registration_policy_requires_and_normalizes_email(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    external = fake_home / "external"
+    external.mkdir()
+    monkeypatch.setenv("OCTOP_DATABASE_DRIVER", "sqlite")
+    monkeypatch.setenv("OCTOP_DATABASE_SQLITE_PATH", str(external / "control.db"))
+    runner = CliRunner()
+
+    first = runner.invoke(
+        cli,
+        ["init", "--admin-username", "initial", "--admin-password", "TestPass12", "--yes"],
+    )
+    assert first.exit_code == 0, first.output
+
+    from octop.infra.db.pool import SqlitePool
+    from octop.infra.db.repos.settings import SettingsRepo
+    from octop.infra.db.repos.users import UserRepo
+
+    settings = SettingsRepo(SqlitePool(external / "control.db"))
+    settings.set("user_registration.email_required", "true")
+
+    rerun = runner.invoke(
+        cli,
+        ["init", "--admin-username", "initial", "--admin-password", "TestPass12", "--yes"],
+    )
+    assert rerun.exit_code == 0, rerun.output
+    assert "already exists, skipping" in rerun.output
+
+    missing = runner.invoke(
+        cli,
+        ["init", "--admin-username", "second", "--admin-password", "TestPass12", "--yes"],
+    )
+    assert missing.exit_code != 0
+    assert "邮箱" in missing.output or "email" in missing.output.lower()
+
+    monkeypatch.setenv("OCTOP_ADMIN_EMAIL", "  SECOND@Example.com ")
+    created = runner.invoke(
+        cli,
+        ["init", "--admin-username", "second", "--admin-password", "TestPass12", "--yes"],
+    )
+    assert created.exit_code == 0, created.output
+    user = UserRepo(SqlitePool(external / "control.db")).get_by_username("second")
+    assert user is not None
+    assert user.email == "second@example.com"
+
+
+def test_init_admin_email_flag_normalizes_on_first_creation(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OCTOP_ADMIN_EMAIL", raising=False)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "init",
+            "--admin-username",
+            "flag-admin",
+            "--admin-password",
+            "TestPass12",
+            "--admin-email",
+            "  FLAG@Example.com ",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output or str(result.exception)
+
+    from octop.infra.db.pool import SqlitePool
+    from octop.infra.db.repos.users import UserRepo
+    from octop.infra.utils.paths import PathLayout
+
+    row = UserRepo(SqlitePool(PathLayout(fake_home / ".octop").db)).get_by_username("flag-admin")
+    assert row is not None
+    assert row.email == "flag@example.com"

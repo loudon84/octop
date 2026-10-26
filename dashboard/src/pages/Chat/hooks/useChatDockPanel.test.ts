@@ -199,6 +199,73 @@ describe("useChatDockPanel tabs", () => {
     });
   });
 
+  it("replaces same-call state with a fresh one-shot activation", () => {
+    const { result } = renderHook(() =>
+      useChatDockPanel(false, "agent", "thread"),
+    );
+    act(() =>
+      result.current.openToolUiTab({
+        callId: "stateful",
+        state: { selected: "first" },
+      }),
+    );
+    const first = result.current.openTabs.find((tab) => tab.kind === "toolUi")!;
+    act(() =>
+      result.current.openToolUiTab({
+        callId: "stateful",
+        state: { selected: "second" },
+      }),
+    );
+    const second = result.current.openTabs.find(
+      (tab) => tab.kind === "toolUi",
+    )!;
+
+    expect(second.state).toEqual({ selected: "second" });
+    expect(second.activation.id).not.toBe(first.activation.id);
+    expect(first.activation.active).toBe(false);
+    expect(second.activation.active).toBe(true);
+  });
+
+  it("revokes tool presentation in the event call before switching to another tab", () => {
+    const { result } = renderHook(() =>
+      useChatDockPanel(false, "agent", "thread"),
+    );
+    act(() => result.current.openToolUiTab({ callId: "sync-hide" }));
+    const activation = result.current.openTabs.find(
+      (tab) => tab.kind === "toolUi",
+    )!.activation;
+    let activeDuringSwitch = true;
+    act(() => {
+      result.current.openBrowserTab();
+      activeDuringSwitch = activation.active;
+    });
+    expect(activeDuringSwitch).toBe(false);
+    expect(result.current.activeTabId).toBe("browser");
+  });
+
+  it("drops same-call tool state when the scoped thread changes", () => {
+    const { result, rerender } = renderHook(
+      ({ threadId }: { threadId: string }) =>
+        useChatDockPanel(false, "agent", threadId),
+      { initialProps: { threadId: "thread-one" } },
+    );
+    act(() =>
+      result.current.openToolUiTab({
+        callId: "scoped-call",
+        state: { selected: "secret" },
+      }),
+    );
+    expect(result.current.openTabs.some((tab) => tab.kind === "toolUi")).toBe(
+      true,
+    );
+
+    rerender({ threadId: "thread-two" });
+
+    expect(result.current.openTabs.some((tab) => tab.kind === "toolUi")).toBe(
+      false,
+    );
+  });
+
   it("focusToolUiTab reopens dock on an existing tool tab", () => {
     const { result } = renderHook(() => useChatDockPanel(false));
     act(() => {

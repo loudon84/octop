@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import builtins
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, bool_int, insert_returning_id, map_rows, now_ts
@@ -42,6 +44,22 @@ class UserSsoIdentityRow:
             subject=str(r["subject"]),
             kind=str(r["kind"]),
             created_at=int(r["created_at"]),
+        )
+
+
+@dataclass(frozen=True)
+class UserIdentityRow:
+    user_id: int
+    email: str | None
+    disabled: bool
+
+    @classmethod
+    def from_row(cls, row: DbRow) -> UserIdentityRow:
+        email = row["email"]
+        return cls(
+            user_id=int(row["id"]),
+            email=None if email is None else str(email),
+            disabled=bool(row["disabled"]),
         )
 
 
@@ -138,6 +156,43 @@ class UserRepo:
         with self._db.connect() as conn:
             r = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return UserRow.from_row(r) if r else None
+
+    def get_identity(self, user_id: int, *, conn: Any | None = None) -> UserIdentityRow | None:
+        if conn is None:
+            with self._db.connect() as read_conn:
+                return self.get_identity(user_id, conn=read_conn)
+        row = conn.execute(
+            "SELECT id, email, disabled FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return UserIdentityRow.from_row(row) if row is not None else None
+
+    def list_identity_page(
+        self,
+        after_user_id: int,
+        limit: int,
+        *,
+        conn: Any | None = None,
+    ) -> builtins.list[UserIdentityRow]:
+        if conn is None:
+            with self._db.connect() as read_conn:
+                return self.list_identity_page(after_user_id, limit, conn=read_conn)
+        rows = conn.execute(
+            "SELECT id, email, disabled FROM users WHERE id > ? ORDER BY id LIMIT ?",
+            (after_user_id, limit),
+        ).fetchall()
+        return map_rows(rows, UserIdentityRow)
+
+    def lock_identity_rows(
+        self, conn: Any, user_ids: Sequence[int]
+    ) -> builtins.list[UserIdentityRow]:
+        if not user_ids:
+            return []
+        placeholders = ", ".join("?" for _ in user_ids)
+        sql = f"SELECT id, email, disabled FROM users WHERE id IN ({placeholders}) ORDER BY id"
+        if self._db.dialect == "postgresql":
+            sql += " FOR SHARE"
+        rows = conn.execute(sql, tuple(user_ids)).fetchall()
+        return map_rows(rows, UserIdentityRow)
 
     def get_by_username(self, username: str) -> UserRow | None:
         with self._db.connect() as conn:

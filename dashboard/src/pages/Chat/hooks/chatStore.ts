@@ -279,6 +279,11 @@ const usageSamplesByState = new WeakMap<
 
 // ── Tool / stream event hooks (for cross-module bridging) ──
 export type ToolEventKind = "toolStart" | "toolDone";
+export type TurnExecutionOptions = {
+  pluginContext?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  delivery?: "follow_up";
+  onOutcome?: (outcome: "complete" | "rejected" | "uncertain") => void;
+};
 export interface ToolEvent {
   kind: ToolEventKind;
   sessionId: string;
@@ -660,6 +665,20 @@ export function getSnapshot(sessionId: string): SessionSnapshot {
   const state = sessionStates.get(sessionId);
   if (!state) return EMPTY_SNAPSHOT;
   return state._snapshot;
+}
+
+/** Check dispatch blockers from the target session, independent of the visible route. */
+export function isSessionBusyForTurnDispatch(
+  sessionId: string,
+  hostAgentId?: string,
+): boolean {
+  const state = getOrCreate(sessionId);
+  if (state.isStreaming || hasPendingHitl(state.messages)) return true;
+  const hostId =
+    hostAgentId?.trim() || sessionHostAgentId(state, sessionId)?.trim() || "";
+  return [...state.liveSpeakers].some(
+    (speaker) => speaker.trim() && speaker !== hostId,
+  );
 }
 
 /** Remember or clear the pending plan file for the PlanReady card. */
@@ -1297,7 +1316,7 @@ function handleHarnessChunk(
             : "";
         state.pendingPlanPath = pending || null;
       }
-      if (Boolean(chunk.team_wrapup)) {
+      if (chunk.team_wrapup) {
         finalizeWrapupMessages(state, speaker);
         clearSpeakerLive(state, speaker);
         // Wrap-up means members already finished — drop stale live bits
@@ -2164,8 +2183,12 @@ function closeToolCall(
  * (merges into ``octop_ui`` JSON ``data`` when present). Searches the focused
  * session first, then any live session that owns the call id.
  */
-export function patchToolResultData(callId: string, nextData: unknown): void {
-  if (!callId) return;
+export function patchToolResultData(
+  callId: string,
+  nextData: unknown,
+  targetSessionId?: string,
+): boolean {
+  if (!callId) return false;
 
   const tryPatch = (sessionId: string): boolean => {
     const state = sessionStates.get(sessionId);
@@ -2195,11 +2218,13 @@ export function patchToolResultData(callId: string, nextData: unknown): void {
     return true;
   };
 
+  if (targetSessionId !== undefined) return tryPatch(targetSessionId);
   const focused = getFocusedChatSession();
-  if (focused && tryPatch(focused)) return;
+  if (focused && tryPatch(focused)) return true;
   for (const sessionId of sessionStates.keys()) {
-    if (tryPatch(sessionId)) return;
+    if (tryPatch(sessionId)) return true;
   }
+  return false;
 }
 
 /** Seal only the host wrap-up bubble so dispatch can keep streaming. */
@@ -2780,6 +2805,7 @@ async function sendTurnWebSocket(
   reasoningEffort?: string | null,
   conversationMode?: "ask" | "plan" | "craft" | null,
   hitlPolicy?: { mode: string; tools?: string[] } | null,
+  executionOptions?: TurnExecutionOptions,
 ): Promise<boolean> {
   const state = getOrCreate(sessionId);
   const resolvedThreadId = (threadId || sessionId).trim();
@@ -2792,6 +2818,7 @@ async function sendTurnWebSocket(
   return new Promise((resolve) => {
     const ws = tryOpenDashboardWs(agentId);
     if (!ws) {
+      executionOptions?.onOutcome?.("rejected");
       resolve(false);
       return;
     }
@@ -2807,6 +2834,13 @@ async function sendTurnWebSocket(
     liveSockets.set(sessionId, live);
 
     let settled = false;
+    let turnSent = false;
+    let outcomeReported = false;
+    const reportOutcome = (outcome: "complete" | "rejected" | "uncertain") => {
+      if (outcomeReported) return;
+      outcomeReported = true;
+      executionOptions?.onOutcome?.(outcome);
+    };
     const settle = (ok: boolean) => {
       if (settled) return;
       settled = true;
@@ -2824,6 +2858,7 @@ async function sendTurnWebSocket(
         // ignore
       }
       finish();
+      reportOutcome(turnSent ? "uncertain" : "rejected");
       settle(true);
     };
     controller.signal.addEventListener("abort", onAbort, { once: true });
@@ -2861,7 +2896,14 @@ async function sendTurnWebSocket(
       if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
       if (conversationMode) payload.conversation_mode = conversationMode;
       if (hitlPolicy) payload.hitl_policy = hitlPolicy;
+      if (executionOptions?.pluginContext) {
+        payload.plugin_context = executionOptions.pluginContext;
+      }
+      if (executionOptions?.delivery) {
+        payload.delivery = executionOptions.delivery;
+      }
       ws.send(JSON.stringify(payload));
+      turnSent = true;
     };
 
     ws.onmessage = (event) => {
@@ -2870,6 +2912,22 @@ async function sendTurnWebSocket(
         if (!data || typeof data !== "object") return;
         if (!frameBelongsToThread(data, live.threadId)) return;
         if ((data as { type?: string }).type === "turn_status") return;
+        if (
+          String((data as { type?: unknown }).type || "") === "steer.ack" &&
+          String((data as { status?: unknown }).status || "") === "rejected" &&
+          executionOptions?.delivery === "follow_up" &&
+          !String(
+            (data as { client_pending_id?: unknown }).client_pending_id || "",
+          ).trim()
+        ) {
+          reportOutcome("rejected");
+          controller.signal.removeEventListener("abort", onAbort);
+          live.intentionalClose = true;
+          finish();
+          closeLiveSocket(sessionId, { intentional: true });
+          settle(true);
+          return;
+        }
         if (
           applySteerProtocolFrame(
             state,
@@ -2885,6 +2943,7 @@ async function sendTurnWebSocket(
               state.activeTurnId,
             )
           ) {
+            reportOutcome(data.type === "error" ? "uncertain" : "complete");
             if (hitlKeepsSocket(data)) {
               parkLiveSocketForHitl(data, state, sessionId, live);
             } else {
@@ -2909,6 +2968,7 @@ async function sendTurnWebSocket(
             state.activeTurnId,
           )
         ) {
+          reportOutcome(data.type === "error" ? "uncertain" : "complete");
           if (hitlKeepsSocket(data)) {
             parkLiveSocketForHitl(data, state, sessionId, live);
           } else {
@@ -2944,6 +3004,7 @@ async function sendTurnWebSocket(
       if (!openedForTurn && !userCancelled) {
         if (!settled) {
           finish();
+          reportOutcome("rejected");
           settle(true);
         }
         return;
@@ -2960,7 +3021,10 @@ async function sendTurnWebSocket(
         // Keep isStreaming + partial assistant bubble; re-subscribe for later chunks.
         // Do NOT finish() — that seals incomplete content and blocks free-scroll UX.
         touchStreamActivity(sessionId);
-        if (!settled) settle(true);
+        if (!settled) {
+          reportOutcome(turnSent ? "uncertain" : "rejected");
+          settle(true);
+        }
         setTimeout(() => {
           void attachThread(
             sessionId,
@@ -2986,7 +3050,10 @@ async function sendTurnWebSocket(
           opts: { afterUnexpectedDrop: true },
         });
         clearStreamWatchdog(sessionId);
-        if (!settled) settle(true);
+        if (!settled) {
+          reportOutcome(turnSent ? "uncertain" : "rejected");
+          settle(true);
+        }
         return;
       }
 
@@ -2994,6 +3061,7 @@ async function sendTurnWebSocket(
       // keep sticky isStreaming so rebind continues receiving chunks.
       if (wasIntentional && !userCancelled && state.isStreaming && !settled) {
         if (isLiveSocketOpen(sessionId)) {
+          reportOutcome(turnSent ? "uncertain" : "rejected");
           settle(true);
           return;
         }
@@ -3001,6 +3069,7 @@ async function sendTurnWebSocket(
 
       if (!settled) {
         finish();
+        reportOutcome(turnSent ? "uncertain" : "rejected");
         settle(true);
       }
 
@@ -3036,6 +3105,7 @@ export async function sendTurn(
   reasoningEffort?: string | null,
   conversationMode?: "ask" | "plan" | "craft" | null,
   hitlPolicy?: { mode: string; tools?: string[] } | null,
+  executionOptions?: TurnExecutionOptions,
 ): Promise<void> {
   const state = getOrCreate(sessionId);
   rememberRoomAgent(state, agentId);
@@ -3048,6 +3118,7 @@ export async function sendTurn(
     clearStreamingFlags(state);
     notify(state);
     onStreamEnd?.();
+    executionOptions?.onOutcome?.("rejected");
     return;
   }
 
@@ -3057,6 +3128,14 @@ export async function sendTurn(
     clearStreamActivity(sessionId);
     notify(state);
     onStreamEnd?.();
+    executionOptions?.onOutcome?.("rejected");
+    return;
+  }
+
+  // A follow_up represents an independent next turn. Never implement it by
+  // aborting the socket that owns the currently running turn.
+  if (executionOptions?.delivery === "follow_up" && state.isStreaming) {
+    executionOptions.onOutcome?.("rejected");
     return;
   }
 
@@ -3124,6 +3203,7 @@ export async function sendTurn(
     reasoningEffort,
     conversationMode,
     hitlPolicy,
+    executionOptions,
   );
   if (!wsOk) {
     state.messages = [

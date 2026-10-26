@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "status": "IN_PROGRESS",
+  "checked_on": "2026-10-24",
+  "repo": "octop",
+  "branch": "codex/enterprise-p1",
+  "base_commit_sha": "dd9dce470844c25d59effb50615bb3c667ea25cd",
+  "uncommitted_changes": true,
+  "workspace": "C:/Users/Administrator/.codex/worktrees/enterprise-p1/octop",
+  "tool_versions": {
+    "python": "3.13.7",
+    "uv": "0.8.22",
+    "node": "24.14.1",
+    "npm": "11.11.0",
+    "openspec": "1.15.0",
+    "octop-harness": "1.0.4",
+    "octop-gateway": "1.0.3"
+  },
+  "weknora": {
+    "status": "PARTIAL_DISCOVERY_BLOCKED",
+    "version": null,
+    "image_digest": null,
+    "live_probe_report": null,
+    "reported_version": "0.8.3",
+    "reported_base_url": "http://sncon.k9.luyouxia.net:44813",
+    "blocked_reasons": [
+      "NO_INDEXED_TEST_KNOWLEDGE_BASES",
+      "MISSING_IMAGE_DIGEST_AND_REAL_SEARCH_READ_FIXTURES"
+    ],
+    "test_http_exception": {
+      "authorized_by_user": true,
+      "origin": "http://sncon.k9.luyouxia.net:44813",
+      "test_only": true
+    },
+    "discovery": {
+      "requests": 4,
+      "tenant_count": 1,
+      "tenant_id": "10000",
+      "knowledge_base_count": 0,
+      "knowledge_requests": 0,
+      "write_requests": 0
+    }
+  },
+  "search_providers": {
+    "status": "SELECTED_NOT_VERIFIED",
+    "primary": null,
+    "secondary": null,
+    "selected": [
+      "searxng",
+      "firecrawl"
+    ],
+    "primary_candidate": "searxng",
+    "secondary_candidate": "firecrawl"
+  },
+  "postgresql_runtime": "BLOCKED",
+  "windows_desktop_acceptance": "NOT_RUN",
+  "release_gate": "BLOCKED"
+}

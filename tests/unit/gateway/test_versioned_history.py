@@ -522,6 +522,7 @@ async def test_dashboard_processor_writes_only_new_archive(archive):
         yield {"type": "token", "message_id": "answer", "content": "answer"}
 
     manager = MagicMock()
+    manager._plugin_host = None
     manager.stream = stream
     manager.merge_turn_mcp_servers.return_value = None
     manager.prepare_chat_mcp = AsyncMock(return_value=[])
@@ -686,6 +687,7 @@ def _dashboard_with_chunks(archive, chunks):
             yield chunk
 
     manager = MagicMock()
+    manager._plugin_host = None
     manager.stream = stream
     manager.merge_turn_mcp_servers.return_value = None
     manager.prepare_chat_mcp = AsyncMock(return_value=[])
@@ -795,6 +797,7 @@ async def test_dashboard_error_keeps_partial_tokens_and_error(archive):
         raise RuntimeError("Error code: 402 insufficient balance")
 
     manager = MagicMock()
+    manager._plugin_host = None
     manager.stream = stream
     manager.merge_turn_mcp_servers.return_value = None
     manager.prepare_chat_mcp = AsyncMock(return_value=[])

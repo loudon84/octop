@@ -100,6 +100,9 @@
     "USERNAME_TAKEN": "Username is already taken.",
     "EMAIL_TAKEN": "Email is already taken.",
     "EMAIL_INVALID": "Invalid email address.",
+    "EMAIL_REQUIRED": "A valid email address is required.",
+    "REGISTRATION_POLICY_INVALID": "The registration policy is unavailable or invalid.",
+    "REGISTRATION_POLICY_CONFLICT": "Existing email addresses must be valid, normalized, and unique before enabling this policy.",
     "PASSWORD_SAME_AS_OLD": "New password must be different from the current password.",
     "PASSWORD_NOT_SET": "This account signs in through a directory and has no local password to change.",
     "PASSWORD_TOO_WEAK": "Password is too weak: at least 8 characters with letters and digits.",
@@ -185,6 +188,9 @@
     "PLUGIN_INVALID_ARCHIVE": "The download is not a valid plugin ZIP. Use a direct .zip download URL (on GitHub use raw.githubusercontent.com or the “Download” / “raw” link, not the /blob/ page).",
     "PLUGIN_INSTALL_FAILED": "Failed to download or install the plugin: {{reason}}",
     "PLUGIN_ALREADY_EXISTS": "Plugin {{id}} is already installed.",
+    "PLUGIN_HOST_UNAVAILABLE": "Plugin actions are temporarily unavailable.",
+    "PLUGIN_ACTION_INVALID": "The plugin action request is invalid.",
+    "PLUGIN_STATE_CONFLICT": "The plugin state changed. Refresh and try again.",
     "KNOWLEDGE_FEATURE_DISABLED": "Knowledge bases are disabled by the administrator.",
     "KNOWLEDGE_PREREQUISITES_RESTART_REQUIRED": "The knowledge-base embedding components were installed but cannot be loaded by this process yet. Restart the server for them to take effect.",
     "KNOWLEDGE_PREREQUISITES_FAILED": "Knowledge-base embedding prerequisites are not ready.",
@@ -1453,7 +1459,10 @@
       "attachmentsOnly": "{{count}} attachment(s)",
       "attachmentCount": "{{count}} attachment(s)",
       "emptyItem": "Queued message",
-      "flushFailed": "Couldn't send the queued message; it's back in the queue."
+      "flushFailed": "Couldn't send the queued message; it's back in the queue.",
+      "sending": "Sending",
+      "blocked": "Blocked. Edit and retry when ready.",
+      "uncertain": "Outcome unclear. Check thread history before retrying."
     },
     "agentNoDescription": "No description",
     "noSessionsYet": "Send a message to start chatting",
@@ -6544,6 +6553,17 @@
     "chatPermissionTitle": "External agent permission required"
   },
   "plugins": {
+    "surface": {
+      "title": "Plugin settings",
+      "loading": "Loading plugin settings…",
+      "error": "Plugin settings are unavailable."
+    },
+    "readiness": {
+      "loading": "Checking required plugins…",
+      "error": "Required plugin status could not be checked. Retry before using plugin features.",
+      "denied": "You cannot check required plugin status.",
+      "unavailable": "Required plugins are unavailable: {{plugins}}. Plugin features are not ready."
+    },
     "loadError": "Failed to load plugins",
     "saveFailed": "Save failed",
     "saved": "Saved",

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Spin } from "antd";
 import { clearAuthToken, getAuthToken } from "../api/request";
@@ -6,6 +6,11 @@ import { authApi, type OctopUser } from "../api/modules/auth";
 import { applyUserLocale } from "../utils/locale";
 import { isNetworkFetchError } from "../utils/networkError";
 import { CurrentUserProvider } from "../hooks/useCurrentUser";
+import {
+  getAuthSessionEpoch,
+  isAuthSessionCurrent,
+  observeAuthPrincipal,
+} from "../api/authSession";
 import BootOfflinePanel from "./BootOfflinePanel";
 
 interface AuthGuardProps {
@@ -44,27 +49,45 @@ export default function AuthGuard({ children }: AuthGuardProps) {
   const [user, setUser] = useState<OctopUser | null>(null);
   const [offline, setOffline] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
+  const verificationSequence = useRef(0);
+  const publishUser = useCallback(
+    (next: React.SetStateAction<OctopUser | null>) => {
+      const resolved = typeof next === "function" ? next(user) : next;
+      observeAuthPrincipal(resolved);
+      setUser(resolved);
+    },
+    [user],
+  );
 
   useEffect(() => {
     let cancelled = false;
+    const sequence = ++verificationSequence.current;
+    let leaseEpoch = getAuthSessionEpoch();
+    const isCurrent = () =>
+      !cancelled &&
+      verificationSequence.current === sequence &&
+      isAuthSessionCurrent(leaseEpoch);
 
     const check = async () => {
-      setOffline(false);
+      if (isCurrent()) setOffline(false);
       try {
         const status = await authApi.getAuthStatus();
+        if (!isCurrent()) return;
 
         // No admin yet → push to setup wizard; drop any leftover JWT from a
         // previous install so background prefetch cannot stampede lockdown.
         if (status.setup_required) {
           clearAuthToken();
-          if (!cancelled) navigateRef.current("/setup", { replace: true });
+          if (verificationSequence.current === sequence) {
+            navigateRef.current("/setup", { replace: true });
+          }
           return;
         }
 
         // Setup done. Need a token.
         const token = getAuthToken();
         if (!token) {
-          if (!cancelled) {
+          if (isCurrent()) {
             setAuthed(false);
             // Stay on the spinner until navigation away completes — do not
             // flip ``checking`` off or children would mount and 401→/login.
@@ -78,14 +101,16 @@ export default function AuthGuard({ children }: AuthGuardProps) {
         // need to swallow the throw here.
         try {
           const me = await authApi.me();
-          await applyUserLocale(me.locale);
-          if (!cancelled) {
+          if (!isCurrent()) return;
+          leaseEpoch = observeAuthPrincipal(me);
+          await applyUserLocale(me.locale, { isCurrent });
+          if (isCurrent()) {
             setUser(me);
             setAuthed(true);
             setChecking(false);
           }
         } catch (err) {
-          if (cancelled) return;
+          if (!isCurrent()) return;
           if (isNetworkFetchError(err)) {
             setOffline(true);
             setChecking(false);
@@ -96,7 +121,7 @@ export default function AuthGuard({ children }: AuthGuardProps) {
           navigateRef.current("/login", { replace: true });
         }
       } catch (err) {
-        if (cancelled) return;
+        if (!isCurrent()) return;
         // Backend unreachable (or setup/status otherwise failed) — do not
         // mount MainLayout with a null user (that produced a blank white
         // shell with no recovery action).
@@ -143,7 +168,7 @@ export default function AuthGuard({ children }: AuthGuardProps) {
   }
 
   return (
-    <CurrentUserProvider user={user} setUser={setUser}>
+    <CurrentUserProvider user={user} setUser={publishUser}>
       {children}
     </CurrentUserProvider>
   );

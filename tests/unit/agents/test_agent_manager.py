@@ -7,7 +7,7 @@ import contextlib
 import json
 import os
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from octop_harness.plugins import PluginRegistry
 
 from octop.config import OctopConfig
 from octop.i18n.domains.agents import NO_MODELS_CONFIGURED, format_agent_start_error
@@ -59,6 +60,19 @@ def manager(tmp_path: Path) -> AgentManager:
     run_migrations(db)
     services = build_shared_services(db=db, paths=paths, config=OctopConfig())
     return AgentManager(repos=services.repos, paths=services.paths)
+
+
+@pytest.fixture
+def isolated_plugin_registry() -> Iterator[None]:
+    registry = PluginRegistry()
+    previously_loaded = registry.all_loaded()
+    registry.clear()
+    try:
+        yield
+    finally:
+        registry.clear()
+        for plugin in previously_loaded:
+            registry.register(plugin)
 
 
 def _seed_test_provider(manager: AgentManager) -> None:
@@ -851,6 +865,7 @@ def test_format_agent_start_error_unwraps_exception_group() -> None:
 def test_build_harness_config_includes_cronjob_tools_when_cron_manager_set(
     manager: AgentManager,
     tmp_path: Path,
+    isolated_plugin_registry: None,
 ) -> None:
     from unittest.mock import MagicMock
 
@@ -889,6 +904,7 @@ def test_build_harness_config_includes_cronjob_tools_when_cron_manager_set(
 
 def test_build_harness_config_includes_search_knowledge_without_cron(
     manager: AgentManager,
+    isolated_plugin_registry: None,
 ) -> None:
     from octop.infra.knowledge.hint import KnowledgeSearchHintMiddleware
 
@@ -1087,9 +1103,11 @@ def test_bootstrap_complete_defers_graph_refresh(manager: AgentManager) -> None:
 def test_apply_pending_bootstrap_graph_refresh_recompiles_graph(manager: AgentManager) -> None:
     agent_id = "AGT_BOOT2"
     agent = MagicMock()
+    entry = SimpleNamespace(agent=agent, config=SimpleNamespace(middleware=[], tools=[]))
     harness_manager = MagicMock()
-    harness_manager.get_agent.return_value = MagicMock(agent=agent)
+    harness_manager.get_agent.return_value = entry
     manager._harness_manager = harness_manager
+    manager._plugin_entry_config_tokens[agent_id] = (entry, 0)
     manager._bootstrap_graph_refresh_pending.add(agent_id)
 
     manager._apply_pending_bootstrap_graph_refresh(agent_id)
@@ -1233,14 +1251,16 @@ async def test_delete_thread_checkpoint_propagates_unexpected_errors(
 async def test_stream_applies_bootstrap_refresh_after_turn(manager: AgentManager) -> None:
     agent_id = "AGT_STREAM"
     agent = MagicMock()
+    entry = SimpleNamespace(agent=agent, config=SimpleNamespace(middleware=[], tools=[]))
     harness_manager = MagicMock()
 
     async def fake_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[dict[str, str]]:
         yield {"type": "token", "content": "hi"}
 
     harness_manager.stream = fake_stream
-    harness_manager.get_agent.return_value = MagicMock(agent=agent)
+    harness_manager.get_agent.return_value = entry
     manager._harness_manager = harness_manager
+    manager._plugin_entry_config_tokens[agent_id] = (entry, 0)
     manager._bootstrap_graph_refresh_pending.add(agent_id)
 
     chunks = [chunk async for chunk in manager.stream(agent_id, {"thread_id": "thr1"})]

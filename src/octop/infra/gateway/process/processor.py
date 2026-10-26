@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -31,7 +31,7 @@ from octop.infra.agents.teams.team_manager import (
 from octop.infra.agents.teams.team_manager import (
     stamp_team_host_chunk as _maybe_stamp_team_host,
 )
-from octop.infra.errors import OctopError
+from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.gateway.cli.events import message_event_to_cli_chunks
 from octop.infra.gateway.hitl.coordinator import (
     HitlAnswerOutcome,
@@ -640,6 +640,57 @@ class GlobalProcessor:
     # -- IM channel entry (MessageEvent stream) --------------------------------
 
     async def __call__(self, msg: InboundMessage) -> AsyncIterator[MessageEvent]:
+        from octop.infra.agents.plugins.execution import (
+            activate_ticket,
+            reset_ticket,
+            ticket_from_metadata,
+        )
+
+        agent_id = msg.tenant_id or ""
+        ticket = ticket_from_metadata(msg.metadata)
+        thread_id = (
+            ticket.thread_id
+            if ticket is not None
+            else str((msg.metadata or {}).get("thread_id") or "")
+        )
+        if not thread_id and agent_id:
+            session_key = session_key_from_message(msg, agent_id=agent_id)
+            thread_id = self._thread_registry.get_bound_thread_id(session_key) or ""
+        host = getattr(self._agent_manager, "_plugin_host", None)
+        token = None
+        lease = None
+        if host is not None and agent_id:
+            try:
+                lease = await host.begin_execution(
+                    ticket,
+                    agent_id=agent_id,
+                    thread_id=thread_id,
+                    execution_kind="continuation"
+                    if ticket is not None and ticket.execution_kind == "continuation"
+                    else "turn"
+                    if ticket is not None
+                    else None,
+                )
+                token = activate_ticket(host, ticket)
+            except Exception:
+                locale = resolve_user_locale(
+                    channel_type=getattr(msg, "channel_type", None) or "unknown",
+                    metadata=msg.metadata,
+                )
+                denied = OctopError(ErrorCode.FORBIDDEN, "plugin execution unavailable")
+                yield MessageEvent.error_event(denied.localized_message(locale))
+                yield MessageEvent.completed()
+                return
+        try:
+            async for event in self._call_body(msg):
+                yield event
+        finally:
+            if token is not None:
+                reset_ticket(token)
+            if lease is not None and host is not None:
+                host.end_execution(lease)
+
+    async def _call_body(self, msg: InboundMessage) -> AsyncIterator[MessageEvent]:
         from octop.infra.metrics import METRICS  # noqa: PLC0415
 
         METRICS.inc("messages_total")
@@ -944,6 +995,57 @@ class GlobalProcessor:
     # IM channels (DingTalk, Feishu, …) stream via __call__ → MessageEvent instead.
 
     async def iter_turn_chunks(self, msg: InboundMessage) -> AsyncIterator[dict[str, Any]]:
+        from octop.infra.agents.plugins.execution import (
+            activate_ticket,
+            reset_ticket,
+            ticket_from_metadata,
+        )
+
+        agent_id = msg.tenant_id or ""
+        ticket = ticket_from_metadata(msg.metadata)
+        thread_id = (
+            ticket.thread_id
+            if ticket is not None
+            else str((msg.metadata or {}).get("thread_id") or "")
+        )
+        if not thread_id and agent_id:
+            session_key = session_key_from_message(msg, agent_id=agent_id)
+            thread_id = self._thread_registry.get_bound_thread_id(session_key) or ""
+        host = getattr(self._agent_manager, "_plugin_host", None)
+        token = None
+        lease = None
+        if host is not None and agent_id:
+            try:
+                lease = await host.begin_execution(
+                    ticket,
+                    agent_id=agent_id,
+                    thread_id=thread_id,
+                    execution_kind="continuation"
+                    if ticket is not None and ticket.execution_kind == "continuation"
+                    else "turn"
+                    if ticket is not None
+                    else None,
+                )
+                token = activate_ticket(host, ticket)
+            except Exception:
+                locale = resolve_user_locale(
+                    channel_type=getattr(msg, "channel_type", None) or "unknown",
+                    metadata=msg.metadata,
+                )
+                denied = OctopError(ErrorCode.FORBIDDEN, "plugin execution unavailable")
+                yield {"type": "error", "message": denied.localized_message(locale)}
+                yield {"type": "done"}
+                return
+        try:
+            async for chunk in self._iter_turn_chunks_body(msg):
+                yield chunk
+        finally:
+            if token is not None:
+                reset_ticket(token)
+            if lease is not None and host is not None:
+                host.end_execution(lease)
+
+    async def _iter_turn_chunks_body(self, msg: InboundMessage) -> AsyncIterator[dict[str, Any]]:
         """Run one agent turn and yield harness-native stream chunks.
 
         For transports that consume the dashboard chunk protocol (``token``,
@@ -1303,6 +1405,7 @@ class GlobalProcessor:
         thread_id: str,
         user_id: int,
         decisions: list[dict[str, Any]],
+        on_admitted: Callable[[], Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Resume a dashboard HITL turn with the normal history bookkeeping."""
         usage_tracker = UsageTracker()
@@ -1319,11 +1422,12 @@ class GlobalProcessor:
                     agent_id,
                     thread_id,
                     decisions,
+                    on_admitted=on_admitted,
                 ),
                 thread_id=thread_id,
                 policies=self._hitl.session_policies,
                 resume=lambda next_decisions: self._agent_manager.resume_hitl(
-                    agent_id, thread_id, next_decisions
+                    agent_id, thread_id, next_decisions, on_admitted=on_admitted
                 ),
             ):
                 usage_tracker.observe(chunk)
@@ -1392,7 +1496,10 @@ class GlobalProcessor:
         thread_id: str,
         meta: dict[str, Any],
     ) -> dict[str, Any]:
-        from octop.infra.gateway.process.message_keys import COMPOSER_CTX_KEY  # noqa: PLC0415
+        from octop.infra.gateway.process.message_keys import (  # noqa: PLC0415
+            COMPOSER_CTX_KEY,
+            USER_INPUT_KEY,
+        )
 
         media_backend = media_backend_for_agent(self._agent_manager, agent_id)
         source = f"{msg.channel_type}/{msg.channel_id}"
@@ -1422,7 +1529,9 @@ class GlobalProcessor:
             meta=meta,
         )
 
-        message_kwargs: dict[str, Any] = {}
+        message_kwargs: dict[str, Any] = {
+            USER_INPUT_KEY: {"version": 1, "text": msg.text or ""},
+        }
         composer = meta.get(COMPOSER_CTX_KEY)
         if isinstance(composer, dict) and composer:
             message_kwargs[COMPOSER_CTX_KEY] = composer

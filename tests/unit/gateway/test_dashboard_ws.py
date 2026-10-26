@@ -574,6 +574,7 @@ async def test_global_processor_iter_turn_chunks_registers_hitl() -> None:
         }
 
     agent_manager = MagicMock()
+    agent_manager._plugin_host = None
     agent_manager.stream = _stream
     agent_manager.merge_turn_mcp_servers = MagicMock(return_value=None)
     agent_manager.prepare_chat_mcp = AsyncMock(return_value=[])
@@ -627,6 +628,7 @@ async def test_global_processor_iter_turn_chunks_expires_stale_hitl() -> None:
         yield {"type": "token", "content": "ok"}
 
     agent_manager = MagicMock()
+    agent_manager._plugin_host = None
     agent_manager.stream = _stream
     agent_manager.merge_turn_mcp_servers = MagicMock(return_value=None)
     agent_manager.prepare_chat_mcp = AsyncMock(return_value=[])
@@ -716,6 +718,7 @@ async def test_global_processor_iter_turn_chunks_slash(tmp_path: Path) -> None:
     harness = MagicMock()
     harness.aappend_messages = AsyncMock(return_value=[human, ai])
     agent_manager = MagicMock()
+    agent_manager._plugin_host = None
     agent_manager.get_agent.return_value = harness
 
     dispatcher = build_default_dispatcher()

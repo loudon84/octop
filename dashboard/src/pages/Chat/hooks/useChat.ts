@@ -13,6 +13,7 @@ import type {
 import type { HitlSessionPolicy } from "../../../api/types/hitl";
 import type { ThreadArtifact } from "../../../api/modules/octopThreads";
 import * as chatStore from "./chatStore";
+import type { TurnExecutionOptions } from "./chatStore";
 import { shouldBlockHistoryRefresh } from "./wsResumeGate";
 import {
   generateId,
@@ -49,6 +50,20 @@ export type {
   ChatMessage,
   DecisionNotice,
 } from "./sseHelpers";
+
+export type EditTurnSnapshot = {
+  targetThreadId: string;
+  modelRef?: string | null;
+  mcpServers?: string[] | null;
+  knowledgeBaseIds?: string[] | null;
+  targetAgentIds?: string[] | null;
+  composerContext?: UserComposerContext;
+  reasoningMode?: "auto" | "enabled" | "disabled";
+  reasoningEffort?: string | null;
+  conversationMode?: "ask" | "plan" | "craft" | null;
+  hitlPolicy?: HitlSessionPolicy | null;
+  executionOptions?: TurnExecutionOptions;
+};
 
 export type { ContentBlockItem } from "../../../utils/messageParser";
 export {
@@ -897,6 +912,7 @@ export function useChat(
       reasoningEffort?: string | null,
       conversationMode?: "ask" | "plan" | "craft" | null,
       hitlPolicy?: HitlSessionPolicy | null,
+      executionOptions?: TurnExecutionOptions,
     ) => {
       const key = storeKey || stableSessionId;
 
@@ -931,6 +947,7 @@ export function useChat(
         reasoningEffort,
         conversationMode,
         hitlPolicy,
+        executionOptions,
       );
     },
     [stableSessionId],
@@ -1163,29 +1180,40 @@ export function useChat(
     (
       messageId: string,
       newText: string,
-      _sessionKey: string,
       agentId: string,
-    ) => {
+      snapshot: EditTurnSnapshot,
+    ): boolean => {
+      const target = snapshot.targetThreadId;
+      if (chatStore.isSessionBusyForTurnDispatch(target, agentId)) return false;
       const ok = chatStore.truncateAndReplaceUserMessage(
-        stableSessionId,
+        target,
         messageId,
         newText,
       );
-      if (!ok) return;
+      if (!ok) return false;
 
       // Re-send without appending a new user message — it is already in the store
       chatStore.sendTurn(
-        stableSessionId,
+        target,
         newText,
         agentId,
         "",
         undefined,
         undefined,
-        undefined,
-        stableSessionId !== "__empty__" ? stableSessionId : undefined,
+        snapshot.modelRef,
+        target,
+        snapshot.mcpServers,
+        snapshot.knowledgeBaseIds,
+        snapshot.targetAgentIds,
+        snapshot.reasoningMode,
+        snapshot.reasoningEffort,
+        snapshot.conversationMode,
+        snapshot.hitlPolicy,
+        snapshot.executionOptions,
       );
+      return true;
     },
-    [stableSessionId],
+    [],
   );
 
   const clearMessages = useCallback(() => {

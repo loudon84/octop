@@ -29,7 +29,8 @@ def _parse_sse_chunks(raw: str) -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 async def test_dashboard_hitl_resume_registers_followup_hitl_required() -> None:
-    async def _resume(*_args: object, **_kwargs: object):
+    async def _resume(*_args: object, **kwargs: object):
+        kwargs["on_admitted"]()
         yield {"type": "token", "content": "ok"}
         yield {
             "type": "hitl_required",
@@ -258,7 +259,8 @@ async def test_dashboard_hitl_resume_finishes_after_client_disconnect() -> None:
 
 @pytest.mark.asyncio
 async def test_dashboard_hitl_resume_marks_pending_resolved_when_stream_errors() -> None:
-    async def _resume(*_args: object, **_kwargs: object):
+    async def _resume(*_args: object, **kwargs: object):
+        kwargs["on_admitted"]()
         raise RuntimeError("stream died")
         yield {}  # pragma: no cover
 

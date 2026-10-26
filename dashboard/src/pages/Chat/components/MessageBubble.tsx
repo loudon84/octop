@@ -15,6 +15,7 @@ import {
   PanelRight,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useTheme } from "../../../context/ThemeContext";
 import { useNavigate } from "react-router-dom";
 import type { ChatAttachment, ChatMessage } from "../hooks/useChat";
 import UserMessageComposerTags, {
@@ -73,6 +74,7 @@ import {
 import { BuiltinOctopUiFallback } from "../../../plugins/toolRenderers/builtin/BuiltinOctopUiFallback";
 import { ToolUiErrorBoundary } from "../../../plugins/toolRenderers/ToolUiErrorBoundary";
 import { remotePluginUiUnavailable } from "../../../plugins/toolRenderers/remotePluginUi";
+import { listRegisteredRenderers } from "../../../plugins/toolRenderers/registry";
 import {
   lookupPluginIdForTool,
   useToolPluginIndexVersion,
@@ -388,8 +390,11 @@ export function ToolDetailsInline({
   /** When true, skip dock attach / placeholder (full renderer in side panel). */
   forceInline?: boolean;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.language || "en";
+  const { mode: theme } = useTheme();
   const toolDock = useChatToolDock();
+  const toolRegionRef = useRef<HTMLDivElement | null>(null);
   // Plugin UIs load async after mount — bump forces resolve() to re-run.
   const rendererVersion = useToolRendererVersion();
   useToolPluginIndexVersion();
@@ -431,6 +436,136 @@ export function ToolDetailsInline({
     }
   }
 
+  const callId = toolData.callId;
+  const rawToolUiTab = toolDock?.getToolUiTab(callId);
+  const ownerMismatch =
+    !!rawToolUiTab?.pluginId &&
+    rawToolUiTab.pluginId !== registration?.pluginId;
+  const toolUiTab = ownerMismatch ? null : rawToolUiTab;
+  const sourceScopeIdentity = toolDock?.getCurrentScopeIdentity();
+  const isCurrentScope = toolDock?.isCurrentScope;
+  const isToolUiDocked = toolDock?.isToolUiDocked;
+  const createToolHost = toolDock?.createToolHost;
+  const registerToolUiBinding = toolDock?.registerToolUiBinding;
+  const closeToolUiPanel = toolDock?.closeToolUiPanel;
+  const isDocked =
+    !forceInline &&
+    !ownerMismatch &&
+    !!callId &&
+    (toolDock?.isToolUiDocked(callId) ?? false);
+  const presentationActive = forceInline
+    ? !!toolDock?.isToolUiDocked(callId) && !!toolUiTab?.activation.active
+    : !isDocked;
+  const presentation = useMemo(
+    () => ({
+      location: forceInline ? ("side-panel" as const) : ("inline" as const),
+      active: presentationActive,
+      ...(forceInline &&
+      toolUiTab &&
+      Object.prototype.hasOwnProperty.call(toolUiTab, "state")
+        ? { state: toolUiTab.state }
+        : {}),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- metadata refreshes memo renderers without changing presentation state
+    [forceInline, presentationActive, toolUiTab, locale, theme],
+  );
+  const leaseKey = `${callId ?? ""}:${registration?.id ?? "none"}:${
+    forceInline ? "dock" : "inline"
+  }:${isDocked}:${toolUiTab?.activation.id ?? 0}`;
+  const leaseRef = useRef({
+    key: leaseKey,
+    scopeIdentity: sourceScopeIdentity,
+    active: true,
+  });
+  if (
+    leaseRef.current.key !== leaseKey ||
+    leaseRef.current.scopeIdentity !== sourceScopeIdentity
+  ) {
+    leaseRef.current = {
+      key: leaseKey,
+      scopeIdentity: sourceScopeIdentity,
+      active: true,
+    };
+  }
+  const localActivation = leaseRef.current;
+  const setToolRegion = useCallback(
+    (region: HTMLDivElement | null) => {
+      if (!region) localActivation.active = false;
+      toolRegionRef.current = region;
+    },
+    [localActivation],
+  );
+  const returnFocus = useCallback(() => {
+    const region = toolRegionRef.current;
+    if (
+      region?.isConnected &&
+      isCurrentScope?.(sourceScopeIdentity) &&
+      registration &&
+      listRegisteredRenderers().includes(registration) &&
+      resolveToolRenderer({
+        toolName: toolData.name,
+        pluginId: registration.pluginId,
+        parsed,
+      }) === registration
+    ) {
+      region.focus();
+    }
+  }, [
+    isCurrentScope,
+    sourceScopeIdentity,
+    registration,
+    toolData.name,
+    parsed,
+  ]);
+  useEffect(() => {
+    const release =
+      callId && registerToolUiBinding
+        ? registerToolUiBinding(callId, localActivation, () => {
+            localActivation.active = false;
+          })
+        : undefined;
+    return () => {
+      release?.();
+    };
+  }, [callId, registerToolUiBinding, localActivation]);
+  useEffect(() => {
+    if (ownerMismatch && callId) closeToolUiPanel?.(callId);
+  }, [ownerMismatch, callId, closeToolUiPanel]);
+  const host = useMemo(() => {
+    if (!registration || registration.pluginId === "builtin") {
+      return builtinPluginHost;
+    }
+    if (!callId || !createToolHost || !isToolUiDocked) {
+      return createPluginUiHost(registration.pluginId);
+    }
+    return createToolHost({
+      registration,
+      parsed,
+      toolName: toolData.name ?? "",
+      callId,
+      isMounted: () =>
+        localActivation.active &&
+        (forceInline
+          ? !!toolUiTab?.activation.active && isToolUiDocked(callId)
+          : !isToolUiDocked(callId)),
+      deactivate: () => {
+        localActivation.active = false;
+      },
+      returnFocus: forceInline ? undefined : returnFocus,
+    });
+  }, [
+    registration,
+    parsed,
+    toolData.name,
+    callId,
+    createToolHost,
+    isToolUiDocked,
+    forceInline,
+    returnFocus,
+    toolUiTab?.activation,
+    localActivation,
+  ]);
+
   const props: ToolRenderProps = {
     pluginId: registration?.pluginId ?? pluginId,
     toolName: toolData.name ?? "",
@@ -440,10 +575,8 @@ export function ToolDetailsInline({
     args,
     data: resolvedData,
     textFallback: parsed.text,
-    host:
-      registration && registration.pluginId !== "builtin"
-        ? createPluginUiHost(registration.pluginId)
-        : builtinPluginHost,
+    host,
+    presentation,
     output: toolData.output,
     isStreaming,
     hideMediaPreview,
@@ -452,13 +585,6 @@ export function ToolDetailsInline({
   };
 
   const dockable = canDockToolUi(registration ?? null, parsed);
-  const callId = toolData.callId;
-  const isDocked =
-    !forceInline &&
-    dockable &&
-    !!callId &&
-    (toolDock?.isToolUiDocked(callId) ?? false);
-
   const showDockButton =
     !forceInline && !isDocked && dockable && !!callId && !!toolDock;
   const { wrapRef, buttonStyle } = useToolUiDockButtonStyle(showDockButton, [
@@ -467,14 +593,33 @@ export function ToolDetailsInline({
     rendererVersion,
   ]);
 
+  const openToolUiPanel = toolDock?.openToolUiPanel;
+  const focusToolUiPanel = toolDock?.focusToolUiPanel;
+
   const openInDock = useCallback(() => {
     if (!callId || !toolDock) return;
-    toolDock.openToolUiPanel({
+    const options = {
       callId,
       title: toolUiDockLabel(toolData),
       toolName: toolData.name,
-    });
-  }, [callId, toolData, toolDock]);
+      returnFocus,
+    };
+    if (registration && registration.pluginId !== "builtin") {
+      host.openSidePanel(options);
+    } else {
+      localActivation.active = false;
+      openToolUiPanel?.(options);
+    }
+  }, [
+    callId,
+    toolData,
+    toolDock,
+    openToolUiPanel,
+    returnFocus,
+    registration,
+    host,
+    localActivation,
+  ]);
 
   const dockActions = showDockButton ? (
     <div className={styles.toolUiDockActions} style={buttonStyle}>
@@ -493,20 +638,27 @@ export function ToolDetailsInline({
 
   if (isDocked) {
     return (
-      <button
-        type="button"
-        className={styles.toolUiDockPlaceholder}
-        onClick={() => toolDock?.focusToolUiPanel(callId!)}
-        title={t("chat.toolUiDockedOpen", "Open side panel")}
+      <div
+        ref={setToolRegion}
+        tabIndex={-1}
+        role="group"
+        aria-label={toolUiDockLabel(toolData)}
       >
-        <PanelRight size={16} strokeWidth={2} aria-hidden />
-        <span className={styles.toolUiDockPlaceholderTitle}>
-          {toolUiDockLabel(toolData)}
-        </span>
-        <span className={styles.toolUiDockPlaceholderHint}>
-          {t("chat.toolUiDockedHint", "Moved to side panel")}
-        </span>
-      </button>
+        <button
+          type="button"
+          className={styles.toolUiDockPlaceholder}
+          onClick={() => focusToolUiPanel?.(callId!)}
+          title={t("chat.toolUiDockedOpen", "Open side panel")}
+        >
+          <PanelRight size={16} strokeWidth={2} aria-hidden />
+          <span className={styles.toolUiDockPlaceholderTitle}>
+            {toolUiDockLabel(toolData)}
+          </span>
+          <span className={styles.toolUiDockPlaceholderHint}>
+            {t("chat.toolUiDockedHint", "Moved to side panel")}
+          </span>
+        </button>
+      </div>
     );
   }
 
@@ -514,14 +666,21 @@ export function ToolDetailsInline({
     const Comp = registration.component;
     return (
       <div
-        ref={wrapRef}
-        data-octop-tool-renderer=""
-        className={styles.toolUiRendererWrap}
+        ref={setToolRegion}
+        tabIndex={-1}
+        role="group"
+        aria-label={toolUiDockLabel(toolData)}
       >
-        <ToolUiErrorBoundary propsForFallback={props}>
-          <Comp {...props} />
-        </ToolUiErrorBoundary>
-        {dockActions}
+        <div
+          ref={wrapRef}
+          data-octop-tool-renderer=""
+          className={styles.toolUiRendererWrap}
+        >
+          <ToolUiErrorBoundary propsForFallback={props}>
+            <Comp {...props} />
+          </ToolUiErrorBoundary>
+          {dockActions}
+        </div>
       </div>
     );
   }
@@ -535,15 +694,22 @@ export function ToolDetailsInline({
     });
     return (
       <div
-        ref={wrapRef}
-        data-octop-tool-renderer=""
-        className={styles.toolUiRendererWrap}
+        ref={setToolRegion}
+        tabIndex={-1}
+        role="group"
+        aria-label={toolUiDockLabel(toolData)}
       >
-        <BuiltinOctopUiFallback
-          {...props}
-          annotateMissingPlugin={annotateMissingPlugin}
-        />
-        {dockActions}
+        <div
+          ref={wrapRef}
+          data-octop-tool-renderer=""
+          className={styles.toolUiRendererWrap}
+        >
+          <BuiltinOctopUiFallback
+            {...props}
+            annotateMissingPlugin={annotateMissingPlugin}
+          />
+          {dockActions}
+        </div>
       </div>
     );
   }

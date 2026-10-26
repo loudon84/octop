@@ -104,6 +104,29 @@ async def test_directory_login_provisions_an_account_and_maps_the_admin_group(
     assert srv.services.user_repo.count() == 2  # only admin + alice
 
 
+async def test_ldap_notifies_only_the_first_successful_provision(
+    env, directory: FakeLdapDirectory
+) -> None:
+    client, srv, auth = env
+    notifications: list[None] = []
+    assert srv.user_manager is not None
+    srv.user_manager._user_created_notifier = lambda: notifications.append(None)
+    assert (await _configure(client, auth)).status_code == 200
+
+    first = await _login(client, "carol", "carolpw")
+    assert first.status_code == 200
+    assert notifications == [None]
+
+    again = await _login(client, "carol", "carolpw")
+    assert again.status_code == 200
+    assert notifications == [None]
+    provider = srv.services.sso_repo.get_by_kind("ldap")
+    assert provider is not None
+    row = srv.services.user_repo.get_by_sso(provider.id, "uuid-carol")
+    assert row is not None
+    del directory
+
+
 async def test_directory_user_outside_admin_groups_gets_the_user_role(
     env, directory: FakeLdapDirectory
 ) -> None:
@@ -118,6 +141,54 @@ async def test_directory_user_outside_admin_groups_gets_the_user_role(
     denied = await client.get("/api/users", headers={"Authorization": f"Bearer {token}"})
     assert denied.status_code == 403
     del srv
+
+
+async def test_ldap_first_creation_obeys_enabled_email_policy_and_bound_login_stays_compatible(
+    env, directory: FakeLdapDirectory
+) -> None:
+    client, srv, auth = env
+    await _configure(client, auth)
+    srv.services.settings_repo.set("user_registration.email_required", "true")
+
+    alice = next(item for item in directory.users if item.username == "alice")
+    alice.email = None
+    missing = await _login(client, "alice", "alicepw")
+    assert missing.status_code == 400
+    assert missing.json()["error"]["code"] == "EMAIL_REQUIRED"
+    assert srv.services.user_repo.get_by_username("alice") is None
+
+    alice.email = "  Alice@Example.org  "
+    created = await _login(client, "alice", "alicepw")
+    assert created.status_code == 200
+    row = srv.services.user_repo.get_by_username("alice")
+    assert row is not None
+    assert row.email == "alice@example.org"
+
+    carol = next(item for item in directory.users if item.username == "carol")
+    carol.email = "alice@example.org"
+    duplicate = await _login(client, "carol", "carolpw")
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error"]["code"] == "EMAIL_TAKEN"
+    assert srv.services.user_repo.get_by_username("carol") is None
+
+    # A previously bound identity remains usable when a later directory claim
+    # disappears or conflicts with another Octop account.
+    srv.services.user_repo.create(
+        username="other", password_hash="not-used", role="user", email="other@example.org"
+    )
+    alice.email = "other@example.org"
+    existing_login = await _login(client, "alice", "alicepw")
+    assert existing_login.status_code == 200
+    assert existing_login.json()["user"]["id"] == row.id
+    assert srv.services.user_repo.get(row.id).email == "alice@example.org"
+
+    # Existing provider bindings remain usable even if the persisted policy is bad.
+    srv.services.settings_repo.set("user_registration.email_required", "invalid")
+    alice.email = None
+    unavailable_policy_login = await _login(client, "alice", "alicepw")
+    assert unavailable_policy_login.status_code == 200
+    assert unavailable_policy_login.json()["user"]["id"] == row.id
+    assert srv.services.user_repo.count() == 3
 
 
 async def test_roles_are_assigned_at_provisioning_and_not_silently_raised(

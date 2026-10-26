@@ -87,10 +87,14 @@ def create_user_offline(
     email: str | None = None,
     home: Path | None = None,
 ) -> dict[str, Any]:
-    from octop.infra.users.email import parse_optional_email
+    from octop.infra.users.registration_policy import (
+        load_registration_policy,
+        validate_registration_email,
+    )
 
-    normalized_email = parse_optional_email(email)
     with open_cli_services(home) as svc:
+        policy = load_registration_policy(svc.settings_repo)
+        normalized_email = validate_registration_email(email, policy)
         if svc.user_repo.get_by_username(username) is not None:
             raise OctopError(ErrorCode.USERNAME_TAKEN, f"username {username!r} already exists")
         if (

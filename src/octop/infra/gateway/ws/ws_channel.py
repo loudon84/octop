@@ -475,6 +475,15 @@ def _continuation_inbound(
 ) -> InboundMessage:
     """Clone inbound for a steer continuation (same thread / connection)."""
     meta = dict(original.metadata or {})
+    from octop.infra.agents.plugins.execution import (
+        ticket_from_metadata,
+        ticket_metadata,
+        ticket_with_kind,
+    )
+
+    ticket = ticket_from_metadata(meta)
+    if ticket is not None:
+        meta.update(ticket_metadata(ticket_with_kind(ticket, "continuation")))
     content = _content_from_steer(text, blocks)
     attachments = inbound_attachments_from_parts(content)
     if attachments:

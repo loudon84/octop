@@ -7,8 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import HumanMessage
-from octop_gateway.models import ChannelSubject, InboundMessage, TextContent
+from octop_gateway.models import ChannelSubject, FileContent, InboundMessage, TextContent
 
+from octop.infra.gateway.process.message_keys import USER_INPUT_KEY
 from octop.infra.gateway.process.processor import GlobalProcessor, _overwrite_last_user_text
 from octop.infra.gateway.slash.dispatcher import SlashDispatcher
 
@@ -80,13 +81,96 @@ async def test_dashboard_execute_overwrites_user_text() -> None:
         thread_id="thr",
         meta={},
     )
-    assert request["messages"][0]["content"] == "请按 plans/foo.md 执行"
+    human = request["messages"][0]
+    assert isinstance(human, HumanMessage)
+    assert human.content == "请按 plans/foo.md 执行"
+    assert human.additional_kwargs[USER_INPUT_KEY] == {
+        "version": 1,
+        "text": "按计划执行",
+    }
     assert request["conversation_mode"] == "craft"
     processor._thread_registry.update_composer.assert_called_once_with(
         "thr",
         conversation_mode="craft",
         pending_plan_path=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_dashboard_input_metadata_preserves_exact_text_and_ignores_forgery() -> None:
+    processor = _processor(thread=None)
+    forged = {"version": 999, "text": "client supplied"}
+    msg = InboundMessage(
+        channel_id="ws",
+        channel_type="dashboard",
+        tenant_id="agent-1",
+        channel_subject=ChannelSubject(subject_id="1"),
+        content=[
+            TextContent(text="  exact question\n"),
+            FileContent(
+                filename="notes.txt",
+                mime_type="text/plain",
+                local_path="dashboard/notes.txt",
+            ),
+        ],
+        metadata={USER_INPUT_KEY: forged},
+    )
+    request = await processor._build_dashboard_request(
+        msg,
+        agent_id="agent-1",
+        user_id=1,
+        session_key="sk",
+        thread_id="thr",
+        meta={USER_INPUT_KEY: forged},
+    )
+
+    human = request["messages"][0]
+    assert isinstance(human, HumanMessage)
+    assert isinstance(human.content, str)
+    assert "  exact question\n" in human.content
+    assert "notes.txt" in human.content
+    assert human.content != "  exact question\n"
+    assert human.additional_kwargs[USER_INPUT_KEY] == {
+        "version": 1,
+        "text": "  exact question\n",
+    }
+    forged["text"] = "mutated client value"
+    assert human.additional_kwargs[USER_INPUT_KEY] == {
+        "version": 1,
+        "text": "  exact question\n",
+    }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_attachment_only_input_stamps_empty_text() -> None:
+    processor = _processor(thread=None)
+    msg = InboundMessage(
+        channel_id="ws",
+        channel_type="dashboard",
+        tenant_id="agent-1",
+        channel_subject=ChannelSubject(subject_id="1"),
+        content=[
+            FileContent(
+                filename="notes.txt",
+                mime_type="text/plain",
+                local_path="dashboard/notes.txt",
+            )
+        ],
+        metadata={},
+    )
+    request = await processor._build_dashboard_request(
+        msg,
+        agent_id="agent-1",
+        user_id=1,
+        session_key="sk",
+        thread_id="thr",
+        meta={},
+    )
+
+    human = request["messages"][0]
+    assert isinstance(human, HumanMessage)
+    assert human.content
+    assert human.additional_kwargs[USER_INPUT_KEY] == {"version": 1, "text": ""}
 
 
 @pytest.mark.asyncio
@@ -114,7 +198,9 @@ async def test_dashboard_mode_switch_keeps_pending_plan() -> None:
         thread_id="thr",
         meta={"conversation_mode": "ask"},
     )
-    assert request["messages"][0]["content"] == "先问一句"
+    human = request["messages"][0]
+    assert isinstance(human, HumanMessage)
+    assert human.content == "先问一句"
     assert request["conversation_mode"] == "ask"
     processor._thread_registry.update_composer.assert_called_once_with(
         "thr",

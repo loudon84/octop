@@ -44,6 +44,8 @@ _CONTINUATION_META_KEYS = frozenset(
     {
         "session_key",
         "thread_id",
+        "plugin_context",
+        "_octop_plugin_execution_ticket",
         "user_is_admin",
         "mcp_servers",
         "knowledge_base_ids",
@@ -196,11 +198,20 @@ class SteerCoordinator:
                 state.continuation_meta = kept
 
     def continuation_metadata(self, thread_id: str) -> dict[str, Any]:
+        from octop.infra.agents.plugins.execution import (
+            ExecutionTicket,
+            ticket_with_kind,
+        )
+
         with self._lock:
             state = self._by_thread.get(thread_id.strip())
             if state is None:
                 return {}
-            return dict(state.continuation_meta)
+            result = dict(state.continuation_meta)
+        ticket = result.get("_octop_plugin_execution_ticket")
+        if isinstance(ticket, ExecutionTicket):
+            result["_octop_plugin_execution_ticket"] = ticket_with_kind(ticket, "continuation")
+        return result
 
     def sweep_expired(self, thread_id: str) -> DiscardBundle | None:
         """Drop an HITL park that outlived the approval window."""

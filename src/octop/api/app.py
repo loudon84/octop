@@ -75,6 +75,13 @@ def _mount_routers(app: FastAPI, mounts: Sequence[_RouterMount]) -> None:
 
 
 def _install_exception_handlers(app: FastAPI) -> None:
+    def _log_path(request: Request) -> str:
+        path = request.url.path
+        resource_marker = "/resources/"
+        if path.startswith("/api/plugins/") and resource_marker in path:
+            return path.split(resource_marker, 1)[0] + resource_marker + "{resource_token}"
+        return path
+
     @app.exception_handler(OctopError)
     async def _octop(request: Request, exc: OctopError) -> JSONResponse:
         # Client responses are locale-localized; log the original English message
@@ -83,7 +90,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
             logger.error(
                 "OctopError %s in %s: %s",
                 exc.code.value,
-                request.url.path,
+                _log_path(request),
                 exc.message,
                 exc_info=exc,
             )
@@ -92,7 +99,7 @@ def _install_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
-        logger.exception("unhandled exception in %s", request.url.path)
+        logger.exception("unhandled exception in %s", _log_path(request))
         locale = resolve_request_locale(request)
         err = OctopError.localized(ErrorCode.INTERNAL_ERROR, locale)
         return JSONResponse(status_code=err.status, content=err.to_envelope())

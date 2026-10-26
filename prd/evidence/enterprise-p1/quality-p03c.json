@@ -1,0 +1,89 @@
+{
+  "stage": "P03c-host-integration",
+  "status": "FAILED",
+  "recorded_at": "2026-10-24T14:20:41.043010+00:00",
+  "base_commit": "dd9dce470844c25d59effb50615bb3c667ea25cd",
+  "branch": "codex/enterprise-p1",
+  "uncommitted": true,
+  "commands": {
+    "make_all": "PYTHONUTF8=1 make SHELL=D:/Git/bin/bash.exe PYTEST_JOBS=4 all (from Git Bash)",
+    "frontend_typecheck": "cd dashboard; npx tsc -b"
+  },
+  "results": {
+    "ruff": "PASS",
+    "format": "PASS",
+    "mypy": "PASS (602 source files)",
+    "backend_tests": {
+      "failed": 10,
+      "passed": 4881,
+      "skipped": 224,
+      "warnings": 17,
+      "duration_seconds": 594.5
+    },
+    "make_all_exit": 2,
+    "frontend_typecheck_exit": 0,
+    "frontend_build": "NOT_RUN"
+  },
+  "code_fingerprint": "229e167e290ed18a999e0ef008eb182761074d0a7609ff39a071137e6616ec82",
+  "files": {
+    "dashboard/src/locales/en.json": "48e47d865555fa3e308b5dc0ebb51aaee72dba044756b28efe20457e457f2f62",
+    "dashboard/src/locales/zh.json": "162d47709ed10ef6e7561bd62fb0b8221366f5adb72a2b815306e1db7e8b1fc1",
+    "scripts/enterprise_knowledge_probe.py": "cb1ad3b3d9b44a230b03dadb5135b4be1b1f123fb85fd93d5ec06ab7b10f25ef",
+    "src/octop/api/app.py": "2d344f9f3ffd1d9becee48e5dff3b4c72a0dfd53a678bd0f77e645677bc6dc70",
+    "src/octop/api/routers/plugin_actions.py": "4d609d26f73f65d886efcd0ae5acc2e351fae57d5638f797c72df437badfc24a",
+    "src/octop/api/routers/plugins.py": "6b9e5b6765550f7c7859e87da63168924e61d653ad466929a226531c9d453fd2",
+    "src/octop/i18n/en.json": "a3bf7d1e83ca41e59167dc4211db07d152e358b77d6cbf96f3012c11fbf22a70",
+    "src/octop/i18n/zh.json": "6ab08225c434fab59c6767cb7e2a98123cbc42dbb7349f9a528830fbeb4f108d",
+    "src/octop/infra/agents/plugins/host.py": "cfc3456623f9c2487beb7ef9fcf11d62f50163190a061444552fd19266fd0dc7",
+    "src/octop/infra/agents/plugins/host_contracts.py": "b83589387e42c6279106c57ada15aba5093e08ccf133c5d07dd752660fd42fc8",
+    "src/octop/infra/agents/plugins/manager.py": "b84bb71a758c8fb56235fee8fb9895f093132eb80c69dfb9d26d2c434efeb6c0",
+    "src/octop/infra/db/migrations/022_plugin_host_storage.pg.sql": "6a3adbc584e89c1af8ca1b2836e69d4fa76825a43325c84193bce87076c1fadc",
+    "src/octop/infra/db/migrations/022_plugin_host_storage.sql": "7105b86fa07723afa6ef8103568d36e26482137d5abb7e172403d80ff636842f",
+    "src/octop/infra/db/repos/plugin_credentials.py": "ac3d92f9ecf06e0c932f925c50e3818c219995e665fbdab748b5dc3f6ca8352a",
+    "src/octop/infra/db/repos/plugin_records.py": "8d735d644d907bfd2910de21951099b3f1fea81737f83e0e5c994192a4ce2a33",
+    "src/octop/infra/db/services.py": "2b9e6f8c2c0802affd1bef807acad720fa6c7201823b87c55bff1509ed19c6e9",
+    "src/octop/infra/errors.py": "3a3481e854f5afa1584331e79192b409d6a83a19fddf0d1b13aa81ab382d735c",
+    "src/octop/infra/server.py": "f72b0a22de99af0723a729c945cc5d1152587ece31cf878b5ac3b2f0b1370f53",
+    "tests/integration/test_plugin_actions.py": "22dd45ee9b4de0dc848a315bff9350ca5b3df1ab272cae35325a95784b0a8fa8",
+    "tests/unit/db/test_db_pool.py": "0a02ec2930dc16ea83c5ad501c8c5602b5ef411998947630856d9c363ee47818",
+    "tests/unit/enterprise/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "tests/unit/enterprise/test_probe.py": "a2bb22e38c2e4428ff2b7f3b96bd874ef286320e339313a71a97ae10bf653531",
+    "tests/unit/plugins/test_host_contracts.py": "6d88d17a7f2cb2ddced12fc38df2ba6e306980f3d6bd483d5b751bc5d24f89e0",
+    "tests/unit/plugins/test_host_credentials.py": "a795a21e81e4ee7a189b8d3e0dbd576ad8ea27d9ea0c40918f2c43396a1a7995",
+    "tests/unit/plugins/test_host_credentials_facade.py": "f6aa1e6c70001a25ddd9c3879f937c88627b6477d1477a8c9eeaf6f350126ef0",
+    "tests/unit/plugins/test_host_lifecycle.py": "5dbb545e83e5679adefe18ca1fd1b305434dca70380dd0e50d160d74cd1b884c",
+    "tests/unit/plugins/test_host_records.py": "5586fe8471957c6c6bc63b84fae113a7b1406412882167369b315f3f61a6a75c"
+  },
+  "alpha_release_gate": "BLOCKED",
+  "note": "Local host stage only; does not verify remote services, PG or desktop acceptance.",
+  "failed_test_ids": [
+    "tests/unit/backup/test_system_archive.py::test_restore_repairs_old_physical_schema_with_current_watermark",
+    "tests/unit/backup/test_system_archive.py::test_refuse_newer_schema_backup_before_database_replace",
+    "tests/unit/db/test_agent_profile_columns.py::test_migration_007_backfills_profile_columns",
+    "tests/unit/db/test_clip_thread_title.py::test_migration_003_repairs_stored_hard_cuts",
+    "tests/unit/db/test_published_experts_repo.py::test_published_experts_table_exists",
+    "tests/unit/db/test_skill_package_icons.py::test_migration_002_idempotent_when_icon_columns_already_present",
+    "tests/unit/db/test_skill_package_icons.py::test_repair_legacy_schema_adds_icon_columns_at_version_2",
+    "tests/unit/db/test_skill_packages_repo.py::test_skill_packages_table_exists",
+    "tests/unit/db/test_repo_knowledge.py::test_knowledge_tables_migrated",
+    "tests/unit/desktop/test_capture_display.py::test_display_str_defaults"
+  ],
+  "code_unchanged_during_tests": true,
+  "follow_up": {
+    "task": "P03-gate1",
+    "scope": "9 latest-schema assertions plus DISPLAY defaults environment isolation; test-only changes",
+    "targeted_tests": {
+      "passed": 66,
+      "duration_seconds": 24.71
+    },
+    "ruff": "PASS",
+    "format": "PASS",
+    "diff_check": "PASS",
+    "independent_review": {
+      "spec": "PASS",
+      "quality": "PASS",
+      "findings": 0
+    },
+    "final_full_gate": "PENDING after P03d/P04 integration"
+  }
+}

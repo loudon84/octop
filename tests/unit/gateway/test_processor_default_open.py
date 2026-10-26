@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import HumanMessage
 from octop_gateway.models import ChannelSubject, InboundMessage, TextContent
 
 from octop.infra.errors import ErrorCode, OctopError
+from octop.infra.gateway.process.message_keys import USER_INPUT_KEY
 from octop.infra.gateway.process.processor import GlobalProcessor
 from octop.infra.gateway.slash.dispatcher import SlashDispatcher
 
@@ -22,6 +24,7 @@ async def test_im_call_merges_default_open_mcp_servers() -> None:
         yield MagicMock()
 
     agent_manager = MagicMock()
+    agent_manager._plugin_host = None
     agent_manager.merge_turn_mcp_servers = MagicMock(return_value=["docs__1"])
     agent_manager.default_mcp_servers = MagicMock(return_value=[])
     agent_manager.default_knowledge_base_ids = MagicMock(return_value=[])
@@ -86,6 +89,7 @@ async def test_im_call_skips_default_open_mcp_for_team_host() -> None:
         yield MagicMock()
 
     agent_manager = MagicMock()
+    agent_manager._plugin_host = None
     agent_manager.merge_turn_mcp_servers = MagicMock(return_value=None)
     agent_manager.default_mcp_servers = MagicMock(return_value=["docs__1"])
     agent_manager.default_knowledge_base_ids = MagicMock(return_value=[])
@@ -291,8 +295,13 @@ async def test_dashboard_request_attaches_knowledge_base_ids_without_prepending(
         meta=msg.metadata or {},
     )
 
-    content = request["messages"][0]["content"]
-    assert content == "question"
+    message = request["messages"][0]
+    assert isinstance(message, HumanMessage)
+    assert message.content == "question"
+    assert message.additional_kwargs[USER_INPUT_KEY] == {
+        "version": 1,
+        "text": "question",
+    }
     configurable = request.get("configurable") or {}
     assert configurable["knowledge_base_ids"] == ["kb-1"]
     assert configurable["knowledge_base_catalog"] == [

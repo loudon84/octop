@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -98,6 +99,51 @@ if TYPE_CHECKING:
     from octop.infra.utils.paths import PathLayout
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _MountedPlugin:
+    plugin_id: str
+    version: str
+    kind: str
+    context: object
+    hooks: tuple[object, ...]
+    tools: tuple[tuple[object, object], ...]
+    read_only_tools: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _PluginMountCandidate:
+    generation: int
+    registry_epoch: int
+    config_token: int
+    config_signature: str
+    config: HarnessAgentConfig
+    registrations: tuple[_MountedPlugin, ...]
+
+
+@dataclass(frozen=True)
+class _PluginMountSnapshot:
+    agent_id: str
+    generation: int
+    registry_epoch: int
+    config_token: int
+    config_signature: str
+    entry: AgentEntry
+    config: HarnessAgentConfig
+    registrations: tuple[_MountedPlugin, ...]
+
+    @property
+    def mounted_hooks(self) -> dict[str, tuple[object, ...]]:
+        return {item.plugin_id: item.hooks for item in self.registrations if item.hooks}
+
+    @property
+    def contexts(self) -> dict[str, object]:
+        return {item.plugin_id: item.context for item in self.registrations}
+
+    @property
+    def mounted_tools(self) -> dict[str, tuple[tuple[object, object], ...]]:
+        return {item.plugin_id: item.tools for item in self.registrations if item.tools}
 
 
 def _model_retry_on_failure(
@@ -426,7 +472,7 @@ def _sanitize_bound_mcp_tools(agent: Any) -> None:
     if not tools:
         return
     before = [str(getattr(t, "name", "")) for t in tools]
-    sanitize_plugin_tool_names(tools)
+    sanitize_plugin_tool_names(tools, reserved={"tool_search"})
     if before != [str(getattr(t, "name", "")) for t in tools]:
         agent.replace_mcp_tools(tools)
 
@@ -467,6 +513,7 @@ class AgentManager:
         config: OctopConfig | None = None,
         expert_catalog: ExpertCatalog | None = None,
         plugin_manager: PluginManager | None = None,
+        plugin_host: Any | None = None,
     ) -> None:
         self._repos = repos
         self._paths = paths
@@ -475,6 +522,7 @@ class AgentManager:
         self._config = config or _OctopConfig()
         self._expert_catalog = expert_catalog
         self._plugin_manager = plugin_manager
+        self._plugin_host = plugin_host
         self._cron_manager: CronManager | None = None
         self._proactive_scheduler: ProactiveCareScheduler | None = None
         self._team_processor: Any | None = None
@@ -509,6 +557,11 @@ class AgentManager:
         self._reload_dirty: set[str] = set()
         self._reload_worker_running: dict[str, bool] = {}
         self._bootstrap_graph_refresh_pending: set[str] = set()
+        self._plugin_mount_generations: dict[str, int] = {}
+        self._plugin_mount_snapshots: dict[str, _PluginMountSnapshot] = {}
+        self._plugin_config_tokens: dict[str, int] = {}
+        self._plugin_config_writes: dict[str, int] = {}
+        self._plugin_entry_config_tokens: dict[str, tuple[AgentEntry, int]] = {}
         # Completion latch set by the bootstrap callback. Do not cache False:
         # the middleware can complete between dashboard polls.
         self._bootstrap_known: dict[str, bool] = {}
@@ -548,6 +601,425 @@ class AgentManager:
         self._mcp_tool_cache_guard = asyncio.Lock()
         # Sanitized plugin tool name → original label (per agent, rebuilt on reload).
         self._plugin_tool_labels: dict[str, dict[str, str]] = {}
+        self._plugin_tool_origins: dict[str, dict[int, tuple[object, str, str, object]]] = {}
+
+    def _record_plugin_tool_origins(
+        self,
+        agent_id: str,
+        tools: list[Any],
+        *,
+        agent_plugins: dict[str, Any],
+        global_plugins: dict[str, bool],
+    ) -> None:
+        """Map builder-selected SDK tools to their exact pre-sanitized registrations."""
+        from octop_harness.plugins import PluginRegistry
+        from octop_harness.plugins.tools import _tool_enabled
+
+        origins: dict[int, tuple[object, str, str, object]] = {}
+        registrations = [
+            registration
+            for registration in PluginRegistry().all_tools()
+            if _tool_enabled(
+                registration.plugin_id,
+                registration.name,
+                agent_plugins=agent_plugins,
+                global_plugins=global_plugins,
+            )
+        ]
+        if len(registrations) != len(tools):
+            self._plugin_tool_origins[agent_id] = origins
+            return
+        for tool, registration in zip(tools, registrations, strict=True):
+            name = str(getattr(tool, "name", ""))
+            function = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
+            if registration.name != name or registration.fn is not function:
+                origins.clear()
+                break
+            origins[id(tool)] = (
+                tool,
+                registration.plugin_id,
+                registration.name,
+                registration.fn,
+            )
+        self._plugin_tool_origins[agent_id] = origins
+
+    @staticmethod
+    def _plugin_config_signature(config: HarnessAgentConfig) -> str:
+        middleware = tuple(id(item) for item in (config.middleware or []))
+        tools = tuple(
+            (id(tool), id(function))
+            for tool in (config.tools or [])
+            if (function := getattr(tool, "coroutine", None) or getattr(tool, "func", None))
+            is not None
+        )
+        return hashlib.sha256(repr((middleware, tools)).encode()).hexdigest()
+
+    @staticmethod
+    def _same_plugin_mounts(
+        left: tuple[_MountedPlugin, ...], right: tuple[_MountedPlugin, ...]
+    ) -> bool:
+        if len(left) != len(right):
+            return False
+        for old, new in zip(left, right, strict=True):
+            if (
+                old.plugin_id != new.plugin_id
+                or old.version != new.version
+                or old.kind != new.kind
+                or old.context is not new.context
+                or len(old.hooks) != len(new.hooks)
+                or any(a is not b for a, b in zip(old.hooks, new.hooks, strict=True))
+                or len(old.tools) != len(new.tools)
+                or old.read_only_tools != new.read_only_tools
+                or any(
+                    old_tool is not new_tool or old_fn is not new_fn
+                    for (old_tool, old_fn), (new_tool, new_fn) in zip(
+                        old.tools, new.tools, strict=True
+                    )
+                )
+            ):
+                return False
+        return True
+
+    def _mark_plugin_mount_stale(self, agent_id: str) -> tuple[int, int]:
+        from octop.infra.agents.plugins.manager import registry_state_guard
+
+        generations = getattr(self, "_plugin_mount_generations", None)
+        if generations is None:
+            generations = self._plugin_mount_generations = {}
+        snapshots = getattr(self, "_plugin_mount_snapshots", None)
+        if snapshots is None:
+            snapshots = self._plugin_mount_snapshots = {}
+        with registry_state_guard() as state:
+            generation = generations.get(agent_id, 0) + 1
+            generations[agent_id] = generation
+            snapshots.pop(agent_id, None)
+            return generation, state.epoch
+
+    def _begin_plugin_config_write(self, agent_id: str) -> None:
+        from octop.infra.agents.plugins.manager import registry_state_guard
+
+        with registry_state_guard():
+            self._plugin_config_tokens[agent_id] = self._plugin_config_tokens.get(agent_id, 0) + 1
+            self._plugin_config_writes[agent_id] = self._plugin_config_writes.get(agent_id, 0) + 1
+            self._plugin_mount_generations[agent_id] = (
+                self._plugin_mount_generations.get(agent_id, 0) + 1
+            )
+            self._plugin_mount_snapshots.pop(agent_id, None)
+
+    def _finish_plugin_config_write(self, agent_id: str) -> None:
+        from octop.infra.agents.plugins.manager import registry_state_guard
+
+        with registry_state_guard():
+            self._plugin_config_tokens[agent_id] = self._plugin_config_tokens.get(agent_id, 0) + 1
+            pending = self._plugin_config_writes.get(agent_id, 0) - 1
+            if pending > 0:
+                self._plugin_config_writes[agent_id] = pending
+            else:
+                self._plugin_config_writes.pop(agent_id, None)
+            self._plugin_mount_generations[agent_id] = (
+                self._plugin_mount_generations.get(agent_id, 0) + 1
+            )
+            self._plugin_mount_snapshots.pop(agent_id, None)
+
+    def _capture_plugin_mount_candidate(
+        self,
+        agent_id: str,
+        config: HarnessAgentConfig,
+        *,
+        generation: int | None = None,
+        registry_epoch: int | None = None,
+        config_token: int | None = None,
+    ) -> _PluginMountCandidate:
+        from octop_harness.plugins import PluginRegistry
+
+        from octop.infra.agents.plugins.manager import current_state
+
+        generations = getattr(self, "_plugin_mount_generations", {})
+        state = current_state()
+        mounted = {id(instance) for instance in (config.middleware or [])}
+        configured_tools = tuple(config.tools or [])
+        tool_origins = getattr(self, "_plugin_tool_origins", {}).get(agent_id, {})
+        registrations: list[_MountedPlugin] = []
+        for loaded in PluginRegistry().all_loaded():
+            hooks = tuple(
+                registration.instance
+                for registration in loaded.middleware
+                if id(registration.instance) in mounted
+            )
+            tools = tuple(
+                (tool, registration.fn)
+                for registration in loaded.tools
+                for tool in configured_tools
+                if getattr(tool, "coroutine", None) is registration.fn
+                or getattr(tool, "func", None) is registration.fn
+            )
+            host = getattr(self, "_plugin_host", None)
+            declared = (
+                host._mounted_read_only_tool_names(
+                    loaded.manifest.id,
+                    str(loaded.manifest.version),
+                    loaded.context,
+                )
+                if host is not None and loaded.context is not None
+                else frozenset()
+            )
+            read_only_tools = tuple(
+                str(getattr(tool, "name", ""))
+                for tool in configured_tools
+                if (origin := tool_origins.get(id(tool))) is not None
+                and origin[0] is tool
+                and origin[1] == loaded.manifest.id
+                and origin[2] in declared
+                and any(reg.name == origin[2] and reg.fn is origin[3] for reg in loaded.tools)
+            )
+            if (hooks or tools) and loaded.context is not None:
+                registrations.append(
+                    _MountedPlugin(
+                        loaded.manifest.id,
+                        loaded.manifest.version,
+                        str(loaded.manifest.kind),
+                        loaded.context,
+                        hooks,
+                        tools,
+                        read_only_tools,
+                    )
+                )
+        return _PluginMountCandidate(
+            generation if generation is not None else generations.get(agent_id, 0),
+            state.epoch if registry_epoch is None else registry_epoch,
+            config_token
+            if config_token is not None
+            else getattr(self, "_plugin_config_tokens", {}).get(agent_id, 0),
+            self._plugin_config_signature(config),
+            config,
+            tuple(registrations),
+        )
+
+    def _publish_plugin_mount_snapshot(
+        self,
+        agent_id: str,
+        entry: AgentEntry,
+        candidate: _PluginMountCandidate | None = None,
+        *,
+        bind_config_token: bool = False,
+    ) -> bool:
+        from octop.infra.agents.plugins.manager import registry_state_guard
+
+        candidate = candidate or self._capture_plugin_mount_candidate(agent_id, entry.config)
+        harness_manager = self._harness_manager
+        if harness_manager is None:
+            return False
+        snapshots = getattr(self, "_plugin_mount_snapshots", None)
+        if snapshots is None:
+            snapshots = self._plugin_mount_snapshots = {}
+        generations = getattr(self, "_plugin_mount_generations", {})
+        with registry_state_guard() as state:
+            try:
+                current_entry = harness_manager.get_agent(agent_id)
+            except (AttributeError, KeyError):
+                return False
+            if (
+                state.in_progress
+                or state.epoch != candidate.registry_epoch
+                or generations.get(agent_id, 0) != candidate.generation
+                or getattr(self, "_plugin_config_writes", {}).get(agent_id, 0) > 0
+                or getattr(self, "_plugin_config_tokens", {}).get(agent_id, 0)
+                != candidate.config_token
+                or current_entry is not entry
+                or entry.config is not candidate.config
+                or self._plugin_config_signature(entry.config) != candidate.config_signature
+            ):
+                return False
+            bound = getattr(self, "_plugin_entry_config_tokens", {}).get(agent_id)
+            if bind_config_token:
+                self._plugin_entry_config_tokens[agent_id] = (entry, candidate.config_token)
+            elif bound is None or bound[0] is not entry or bound[1] != candidate.config_token:
+                return False
+            current = self._capture_plugin_mount_candidate(
+                agent_id,
+                entry.config,
+                generation=candidate.generation,
+                registry_epoch=state.epoch,
+            )
+            if not self._same_plugin_mounts(current.registrations, candidate.registrations):
+                return False
+            snapshots[agent_id] = _PluginMountSnapshot(
+                agent_id,
+                candidate.generation,
+                state.epoch,
+                candidate.config_token,
+                candidate.config_signature,
+                entry,
+                entry.config,
+                candidate.registrations,
+            )
+            return True
+
+    def _plugin_mount_snapshot(self, agent_id: str) -> _PluginMountSnapshot:
+        return self._plugin_mount_snapshots[agent_id]
+
+    def _plugin_mount_is_current(self, agent_id: str) -> bool:
+        from octop_harness.plugins import PluginRegistry
+
+        from octop.infra.agents.plugins.manager import registry_state_guard
+
+        snapshots = getattr(self, "_plugin_mount_snapshots", {})
+        generations = getattr(self, "_plugin_mount_generations", {})
+        snapshot = snapshots.get(agent_id)
+        harness_manager = self._harness_manager
+        if snapshot is None or harness_manager is None:
+            return False
+        try:
+            entry = harness_manager.get_agent(agent_id)
+        except (AttributeError, KeyError):
+            return False
+        registry = PluginRegistry()
+        with registry_state_guard() as state:
+            if (
+                state.in_progress
+                or state.epoch != snapshot.registry_epoch
+                or generations.get(agent_id, 0) != snapshot.generation
+                or getattr(self, "_plugin_config_writes", {}).get(agent_id, 0) > 0
+                or getattr(self, "_plugin_config_tokens", {}).get(agent_id, 0)
+                != snapshot.config_token
+                or entry is not snapshot.entry
+                or entry.config is not snapshot.config
+                or self._plugin_config_signature(entry.config) != snapshot.config_signature
+            ):
+                return False
+            bound = getattr(self, "_plugin_entry_config_tokens", {}).get(agent_id)
+            if bound is None or bound[0] is not entry or bound[1] != snapshot.config_token:
+                return False
+            for mounted in snapshot.registrations:
+                loaded = registry.get(mounted.plugin_id)
+                if (
+                    loaded is None
+                    or loaded.manifest.version != mounted.version
+                    or str(loaded.manifest.kind) != mounted.kind
+                    or loaded.context is not mounted.context
+                    or any(
+                        not any(reg.instance is instance for reg in loaded.middleware)
+                        or not any(
+                            current is instance for current in (entry.config.middleware or [])
+                        )
+                        for instance in mounted.hooks
+                    )
+                    or any(
+                        not any(reg.fn is function for reg in loaded.tools)
+                        or not any(
+                            current is tool
+                            and (
+                                getattr(current, "coroutine", None) is function
+                                or getattr(current, "func", None) is function
+                            )
+                            for current in (entry.config.tools or [])
+                        )
+                        for tool, function in mounted.tools
+                    )
+                    or any(
+                        name
+                        not in {
+                            str(getattr(current, "name", ""))
+                            for current in (entry.config.tools or [])
+                        }
+                        for name in mounted.read_only_tools
+                    )
+                ):
+                    return False
+            return True
+
+    async def _begin_agent_execution(
+        self,
+        ticket: Any | None,
+        *,
+        agent_id: str,
+        thread_id: str,
+        execution_kind: str | None,
+        request: dict[str, Any] | None = None,
+    ) -> Any:
+        from octop.infra.agents.plugins.manager import registry_state_guard
+
+        host = self._plugin_host
+        if host is None:
+            from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+            raise PluginHostError("unavailable")
+        initial_snapshot = getattr(self, "_plugin_mount_snapshots", {}).get(agent_id)
+        had_read_only_capability = initial_snapshot is not None and any(
+            item.read_only_tools for item in initial_snapshot.registrations
+        )
+        required = await host.authorize_execution(
+            ticket,
+            agent_id=agent_id,
+            thread_id=thread_id,
+            execution_kind=execution_kind,
+        )
+        snapshot = getattr(self, "_plugin_mount_snapshots", {}).get(agent_id)
+        has_read_only_capability = had_read_only_capability or (
+            snapshot is not None and any(item.read_only_tools for item in snapshot.registrations)
+        )
+        if not required and not has_read_only_capability and request is None:
+            return host._track_authorized_execution(required)
+        task = asyncio.current_task()
+        if task is None:
+            from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+            raise PluginHostError(
+                "unavailable"
+            )  # pragma: no cover - asyncio always supplies a task
+        with registry_state_guard():
+            snapshot = getattr(self, "_plugin_mount_snapshots", {}).get(agent_id)
+            if (required or has_read_only_capability) and not self._plugin_mount_is_current(
+                agent_id
+            ):
+                from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+                raise PluginHostError("unavailable")
+            snapshot = snapshot if snapshot is not None else None
+            if (required or has_read_only_capability) and snapshot is None:
+                from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+                raise PluginHostError("unavailable")
+            capability_plugins: dict[str, str] = {}
+            read_only_names: set[str] = set()
+            if snapshot is not None and (required or has_read_only_capability):
+                for mounted_plugin in snapshot.registrations:
+                    if mounted_plugin.read_only_tools:
+                        capability_plugins[mounted_plugin.plugin_id] = mounted_plugin.version
+                        read_only_names.update(mounted_plugin.read_only_tools)
+            for plugin_id in required:
+                if snapshot is None:
+                    from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+                    raise PluginHostError("unavailable")
+                mounted_plugin = next(
+                    (item for item in snapshot.registrations if item.plugin_id == plugin_id), None
+                )
+                if mounted_plugin is None or mounted_plugin.version != required[plugin_id]:
+                    from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+                    raise PluginHostError("unavailable")
+                capability_mounted = (
+                    bool(mounted_plugin.tools)
+                    if mounted_plugin.kind == "tool"
+                    else bool(mounted_plugin.hooks)
+                    if mounted_plugin.kind == "hook"
+                    else False
+                )
+                if not capability_mounted:
+                    from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+                    raise PluginHostError("unavailable")
+            if request is not None:
+                from octop.infra.agents.conversation_mode import HOST_READ_TOOLS
+
+                configurable = request.get("configurable")
+                final_configurable = dict(configurable) if isinstance(configurable, dict) else {}
+                final_configurable["conversation_mode_extra_read_tools"] = sorted(
+                    set(HOST_READ_TOOLS) | read_only_names
+                )
+                request["configurable"] = final_configurable
+            return host._track_authorized_execution({**required, **capability_plugins}, task)
 
     def replace_persistence(self, repos: RepoBundle, config: OctopConfig) -> None:
         """Retarget repos/config and rebuild settings stores after control-plane rebind."""
@@ -973,6 +1445,7 @@ class AgentManager:
 
     async def update(self, agent_id: str, **kwargs: Any) -> AgentRow:
         """Update agent config in DB and reload harness agent in the background."""
+        self._mark_plugin_mount_stale(agent_id)
         runtime_updates = {
             key: kwargs.pop(key) for key in AGENT_RUNTIME_CONFIG_KEYS if key in kwargs
         }
@@ -1023,7 +1496,13 @@ class AgentManager:
                     new_name,
                     exclude_agent_id=agent_id,
                 )
-        self._repos.agent_repo.update_config(agent_id, **kwargs)
+        if "config_json" in kwargs:
+            self._begin_plugin_config_write(agent_id)
+        try:
+            self._repos.agent_repo.update_config(agent_id, **kwargs)
+        finally:
+            if "config_json" in kwargs:
+                self._finish_plugin_config_write(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -1083,6 +1562,7 @@ class AgentManager:
                 except Exception:
                     logger.exception("failed to drop deleted expert %s from team rosters", agent_id)
             await asyncio.to_thread(self._quiesce_octop_memory, agent_id)
+            self._mark_plugin_mount_stale(agent_id)
             await self._harness_manager.aremove_agent(agent_id)  # type: ignore[union-attr]
         self._bootstrap_known.pop(agent_id, None)
         self._plugin_tool_labels.pop(agent_id, None)
@@ -1156,6 +1636,7 @@ class AgentManager:
             if row is None:
                 raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
             async with self._lifecycle_lock_for(agent_id):
+                self._mark_plugin_mount_stale(agent_id)
                 await asyncio.to_thread(self._quiesce_octop_memory, agent_id)
                 await self._harness_manager.aremove_agent(agent_id)  # type: ignore[union-attr]
                 self._bootstrap_known.pop(agent_id, None)
@@ -1863,12 +2344,33 @@ class AgentManager:
         ):
             self._apply_pending_bootstrap_graph_refresh(agent_id)
             req = self._prepare_stream_request(agent_id, request)
-            with (
-                hitl_thread_scope(thread_id_from_request(req)),
-                turn_model_scope(self._stream_model_label(agent_id, req, thread_id)),
-            ):
-                async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
-                    yield chunk
+            from octop.infra.agents.plugins.execution import current_ticket
+
+            ticket = current_ticket()
+            thread_id = str(req.get("thread_id") or thread_id_from_request(req) or "")
+            if self._plugin_host is not None:
+                if ticket is not None and ticket.execution_kind not in {"turn", "continuation"}:
+                    raise self._unavailable_error(agent_id)
+                execution_kind = ticket.execution_kind if ticket is not None else None
+                lease = await self._begin_agent_execution(
+                    ticket,
+                    agent_id=agent_id,
+                    thread_id=thread_id,
+                    execution_kind=execution_kind,
+                    request=req,
+                )
+            else:
+                lease = None
+            try:
+                with (
+                    hitl_thread_scope(thread_id_from_request(req)),
+                    turn_model_scope(self._stream_model_label(agent_id, req, thread_id)),
+                ):
+                    async for chunk in self._harness_manager.stream(agent_id, cast(Any, req)):
+                        yield chunk
+            finally:
+                if lease is not None and self._plugin_host is not None:
+                    self._plugin_host.end_execution(lease)
             self._apply_pending_bootstrap_graph_refresh(agent_id)
 
     async def call(self, agent_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -1879,11 +2381,31 @@ class AgentManager:
             self._apply_pending_bootstrap_graph_refresh(agent_id)
             req = self._prepare_stream_request(agent_id, request)
             thread_id = str(req.get("thread_id") or thread_id_from_request(req) or "")
-            with (
-                hitl_thread_scope(thread_id_from_request(req)),
-                turn_model_scope(self._stream_model_label(agent_id, req, thread_id)),
-            ):
-                result = await self._harness_manager.call(agent_id, cast(Any, req))
+            from octop.infra.agents.plugins.execution import current_ticket
+
+            ticket = current_ticket()
+            if self._plugin_host is not None:
+                if ticket is not None and ticket.execution_kind not in {"turn", "continuation"}:
+                    raise self._unavailable_error(agent_id)
+                execution_kind = ticket.execution_kind if ticket is not None else None
+                lease = await self._begin_agent_execution(
+                    ticket,
+                    agent_id=agent_id,
+                    thread_id=thread_id,
+                    execution_kind=execution_kind,
+                    request=req,
+                )
+            else:
+                lease = None
+            try:
+                with (
+                    hitl_thread_scope(thread_id_from_request(req)),
+                    turn_model_scope(self._stream_model_label(agent_id, req, thread_id)),
+                ):
+                    result = await self._harness_manager.call(agent_id, cast(Any, req))
+            finally:
+                if lease is not None and self._plugin_host is not None:
+                    self._plugin_host.end_execution(lease)
             self._apply_pending_bootstrap_graph_refresh(agent_id)
         if not isinstance(result, dict):
             return {"result": result}
@@ -1894,24 +2416,58 @@ class AgentManager:
         agent_id: str,
         thread_id: str,
         decisions: list[dict[str, Any]],
+        *,
+        on_admitted: Callable[[], Any] | None = None,
     ) -> AsyncIterator[Any]:
         """Resume a paused HITL interrupt for *thread_id*."""
         if self._harness_manager is None:
             raise self._unavailable_error(agent_id)
-        async with (
-            self._thread_execution_lock(agent_id, thread_id),
-            self._track_invocation(agent_id),
-        ):
-            self._apply_pending_bootstrap_graph_refresh(agent_id)
-            with (
-                hitl_thread_scope(thread_id),
-                turn_model_scope(self._stream_model_label(agent_id, {}, thread_id)),
+        from octop.infra.agents.plugins.execution import (
+            activate_ticket,
+            current_ticket,
+            reset_ticket,
+            ticket_with_kind,
+        )
+
+        ticket = current_ticket()
+        token = None
+        lease = None
+        if self._plugin_host is not None and ticket is not None:
+            ticket = ticket_with_kind(ticket, "resume")
+            token = activate_ticket(self._plugin_host, ticket)
+        try:
+            async with (
+                self._thread_execution_lock(agent_id, thread_id),
+                self._track_invocation(agent_id),
             ):
-                async for chunk in self._harness_manager.resume_hitl(
-                    agent_id, thread_id, decisions
+                self._apply_pending_bootstrap_graph_refresh(agent_id)
+                if self._plugin_host is not None:
+                    lease = await self._begin_agent_execution(
+                        ticket,
+                        agent_id=agent_id,
+                        thread_id=thread_id,
+                        execution_kind="resume",
+                    )
+                if on_admitted is not None:
+                    import inspect
+
+                    admitted = on_admitted()
+                    if inspect.isawaitable(admitted):
+                        await admitted
+                with (
+                    hitl_thread_scope(thread_id),
+                    turn_model_scope(self._stream_model_label(agent_id, {}, thread_id)),
                 ):
-                    yield chunk
-            self._apply_pending_bootstrap_graph_refresh(agent_id)
+                    async for chunk in self._harness_manager.resume_hitl(
+                        agent_id, thread_id, decisions
+                    ):
+                        yield chunk
+                self._apply_pending_bootstrap_graph_refresh(agent_id)
+        finally:
+            if token is not None:
+                reset_ticket(token)
+            if lease is not None and self._plugin_host is not None:
+                self._plugin_host.end_execution(lease)
 
     def cancel_stream(self, agent_id: str, thread_id: str) -> None:
         """Signal octop-harness to stop the active stream for *(agent_id, thread_id)*."""
@@ -1975,7 +2531,88 @@ class AgentManager:
         Does not rebuild Octop-side agent config from the DB — use :meth:`reload` for that.
         """
         if self._harness_manager is not None:
-            self._harness_manager.rebuild_all_agents()
+            list_agents = getattr(self._harness_manager, "list_agents", None)
+            if not callable(list_agents):
+                self._harness_manager.rebuild_all_agents()
+                return
+            entries = tuple(list_agents())
+            tokens: dict[str, tuple[int, int, int, AgentEntry]] = {}
+            bindings = getattr(self, "_plugin_entry_config_tokens", {})
+            from octop.infra.agents.plugins.manager import registry_state_guard
+
+            with registry_state_guard() as state:
+                for entry in entries:
+                    bound = bindings.get(entry.agent_id)
+                    if bound is None or bound[0] is not entry:
+                        continue
+                    generation, _ = self._mark_plugin_mount_stale(entry.agent_id)
+                    tokens[entry.agent_id] = (
+                        generation,
+                        state.epoch,
+                        bound[1],
+                        entry,
+                    )
+            try:
+                self._harness_manager.rebuild_all_agents()
+            except BaseException:
+                # SDK rebuild-all is sequential. Preserve source eligibility for
+                # successful replacements before propagating a later failure;
+                # no ready snapshot is published on this path.
+                self._inherit_rebuilt_plugin_config_bindings(tokens)
+                raise
+            eligible = self._inherit_rebuilt_plugin_config_bindings(tokens)
+            for agent_id, (generation, epoch, config_token, entry) in eligible.items():
+                candidate = self._capture_plugin_mount_candidate(
+                    agent_id,
+                    entry.config,
+                    generation=generation,
+                    registry_epoch=epoch,
+                    config_token=config_token,
+                )
+                self._publish_plugin_mount_snapshot(agent_id, entry, candidate)
+
+    def _inherit_rebuilt_plugin_config_bindings(
+        self,
+        tokens: dict[str, tuple[int, int, int, AgentEntry]],
+    ) -> dict[str, tuple[int, int, int, AgentEntry]]:
+        """Carry a rebuild's source config token to its successfully live entry."""
+        from octop.infra.agents.plugins.manager import registry_state_guard
+
+        harness_manager = self._harness_manager
+        if harness_manager is None:
+            return {}
+        current_entries = {entry.agent_id: entry for entry in harness_manager.list_agents()}
+        generations = getattr(self, "_plugin_mount_generations", {})
+        config_tokens = getattr(self, "_plugin_config_tokens", {})
+        config_writes = getattr(self, "_plugin_config_writes", {})
+        bindings = getattr(self, "_plugin_entry_config_tokens", {})
+        eligible: dict[str, tuple[int, int, int, AgentEntry]] = {}
+        with registry_state_guard() as state:
+            if state.in_progress:
+                return eligible
+            for agent_id, (generation, epoch, config_token, source_entry) in tokens.items():
+                try:
+                    entry = current_entries[agent_id]
+                    current_entry = harness_manager.get_agent(agent_id)
+                except KeyError:
+                    continue
+                if current_entry is not entry:
+                    continue
+                binding = bindings.get(agent_id)
+                if (
+                    state.epoch != epoch
+                    or generations.get(agent_id, 0) != generation
+                    or config_tokens.get(agent_id, 0) != config_token
+                    or config_writes.get(agent_id, 0) > 0
+                    or binding is None
+                    or binding[0] is not source_entry
+                    or binding[1] != config_token
+                ):
+                    continue
+                if entry is not source_entry:
+                    bindings[agent_id] = (entry, config_token)
+                eligible[agent_id] = (generation, epoch, config_token, entry)
+        return eligible
 
     def _agent_uses_auto_default(self, row: AgentRow) -> bool:
         cfg = self.get_config(row.agent_id)
@@ -2199,7 +2836,7 @@ class AgentManager:
                 sanitize_plugin_tool_names,
             )
 
-            sanitize_plugin_tool_names(raw)
+            sanitize_plugin_tool_names(raw, reserved={"tool_search"})
             server_lock = await self._server_lock(user_id, server_name)
             wrapped = wrap_tools_for_shared_use(raw, server_lock)
             self._mcp_tool_cache[cache_key] = wrapped
@@ -2393,7 +3030,7 @@ class AgentManager:
                             sanitize_plugin_tool_names,
                         )
 
-                        sanitize_plugin_tool_names(extra)
+                        sanitize_plugin_tool_names(extra, reserved={"tool_search"})
                         agent.append_mcp_tools(extra)
 
             # Full reload drops previously appended custom tools — re-inject from cache.
@@ -2581,6 +3218,7 @@ class AgentManager:
 
     async def apply_persona_mbti(self, agent_id: str, code: str) -> AgentRow:
         """Persist MBTI persona on the agent row and reload harness runtime."""
+        self._mark_plugin_mount_stale(agent_id)
         norm = code.upper()
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
@@ -2598,12 +3236,16 @@ class AgentManager:
 
         cfg = self.get_config(agent_id)
         cfg["persona"] = norm
-        self.persist_harness_config(
-            agent_id,
-            cfg,
-            persona_mbti=norm,
-            system_prompt=persona_text,
-        )
+        self._begin_plugin_config_write(agent_id)
+        try:
+            self.persist_harness_config(
+                agent_id,
+                cfg,
+                persona_mbti=norm,
+                system_prompt=persona_text,
+            )
+        finally:
+            self._finish_plugin_config_write(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -2612,15 +3254,20 @@ class AgentManager:
 
     async def update_config_json(self, agent_id: str, config_json: str) -> AgentRow:
         """Patch ``config_json`` and reload the harness runtime in the background."""
+        self._mark_plugin_mount_stale(agent_id)
         parsed = self._preserve_internal_layout(
             agent_id, parse_config_json(config_json), pin_workspace_dir=True
         )
         lifted = extract_profile_from_config(parsed)
-        self._repos.agent_repo.update_config(
-            agent_id,
-            config_json=dumps_config(parsed),
-            **lifted,
-        )
+        self._begin_plugin_config_write(agent_id)
+        try:
+            self._repos.agent_repo.update_config(
+                agent_id,
+                config_json=dumps_config(parsed),
+                **lifted,
+            )
+        finally:
+            self._finish_plugin_config_write(agent_id)
         row = self._repos.agent_repo.get(agent_id)
         if row is None:
             raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"agent {agent_id!r} not found")
@@ -2654,9 +3301,14 @@ class AgentManager:
         plugins: dict[str, Any],
     ) -> None:
         """Persist ``config.plugins`` and hot-sync tool denylist (no harness reload)."""
+        self._mark_plugin_mount_stale(agent_id)
         cfg = self.get_config(agent_id)
         cfg["plugins"] = plugins
-        self.persist_harness_config(agent_id, cfg)
+        self._begin_plugin_config_write(agent_id)
+        try:
+            self.persist_harness_config(agent_id, cfg)
+        finally:
+            self._finish_plugin_config_write(agent_id)
         self.sync_effective_tools_disabled(agent_id)
 
     def _resolve_skill_package_dirs(self, agent_id: str) -> list[str]:
@@ -3205,8 +3857,13 @@ class AgentManager:
                     row.name,
                 )
                 return existing
+            generation, epoch = self._mark_plugin_mount_stale(row.agent_id)
+            config_token = self._plugin_config_tokens.get(row.agent_id, 0)
             self._bootstrap_known.pop(row.agent_id, None)
             try:
+                current_row = self._repos.agent_repo.get(row.agent_id)
+                if current_row is not None:
+                    row = current_row
                 from octop.infra.agents.teams import is_team_agent  # noqa: PLC0415
 
                 cfg, metadata, tags, user_display = self._agent_runtime_bundle(row)
@@ -3221,6 +3878,16 @@ class AgentManager:
                     init_workspace=seed_workspace,
                 )
                 await self._post_start_agent(row, entry.agent, cfg, user_display=user_display)
+                candidate = self._capture_plugin_mount_candidate(
+                    row.agent_id,
+                    entry.config,
+                    generation=generation,
+                    registry_epoch=epoch,
+                    config_token=config_token,
+                )
+                self._publish_plugin_mount_snapshot(
+                    row.agent_id, entry, candidate, bind_config_token=True
+                )
                 self._repos.agent_repo.set_state(row.agent_id, "running", error=None)
                 logger.info("Agent %s (%s) started", row.agent_id, row.name)
                 return entry.agent
@@ -3336,9 +4003,21 @@ class AgentManager:
             entry = self._harness_manager.get_agent(agent_id)
         except KeyError:
             return
+        bound = getattr(self, "_plugin_entry_config_tokens", {}).get(agent_id)
+        if bound is None or bound[0] is not entry:
+            return
+        generation, epoch = self._mark_plugin_mount_stale(agent_id)
         self._bootstrap_graph_refresh_pending.discard(agent_id)
         try:
             entry.agent._init_graph()
+            candidate = self._capture_plugin_mount_candidate(
+                agent_id,
+                entry.config,
+                generation=generation,
+                registry_epoch=epoch,
+                config_token=bound[1],
+            )
+            self._publish_plugin_mount_snapshot(agent_id, entry, candidate)
             logger.info("Bootstrap graph refresh applied for agent %s", agent_id)
         except Exception:
             logger.exception("Bootstrap graph refresh failed for agent %s", agent_id)
@@ -3515,6 +4194,8 @@ class AgentManager:
     async def _reload_agent(self, agent_id: str) -> None:
         assert self._harness_manager is not None
         async with self._lifecycle_lock_for(agent_id):
+            generation, epoch = self._mark_plugin_mount_stale(agent_id)
+            config_token = self._plugin_config_tokens.get(agent_id, 0)
             self._bootstrap_graph_refresh_pending.discard(agent_id)
             row = self._repos.agent_repo.get(agent_id)
             if not row or not row.enabled or row.last_state == "stopped":
@@ -3532,6 +4213,16 @@ class AgentManager:
                     tags=tags,
                 )
                 await self._post_start_agent(row, entry.agent, cfg, user_display=user_display)
+                candidate = self._capture_plugin_mount_candidate(
+                    agent_id,
+                    entry.config,
+                    generation=generation,
+                    registry_epoch=epoch,
+                    config_token=config_token,
+                )
+                self._publish_plugin_mount_snapshot(
+                    agent_id, entry, candidate, bind_config_token=True
+                )
                 self._repos.agent_repo.set_state(agent_id, "running", error=None)
             except Exception as exc:
                 recovered = self._octop_harness_or_none(agent_id)
@@ -3551,6 +4242,7 @@ class AgentManager:
 
     def _schedule_reload(self, agent_id: str) -> None:
         """Queue a background harness reload; coalesces rapid successive updates."""
+        self._mark_plugin_mount_stale(agent_id)
         self._reload_dirty.add(agent_id)
         if self._reload_worker_running.get(agent_id):
             return
@@ -3815,6 +4507,7 @@ class AgentManager:
         agent_plugins_map = agent_plugins if isinstance(agent_plugins, dict) else {}
         effective_plugins = dict(global_plugins)
         plugin_tools: list[Any] = []
+        mount_plugins: dict[str, Any] = {}
         if not team_host:
             for plugin in PluginRegistry().list_plugins():
                 if not agent_plugin_enabled(agent_plugins_map, plugin.manifest.id):
@@ -3831,6 +4524,12 @@ class AgentManager:
         else:
             for plugin in PluginRegistry().list_plugins():
                 effective_plugins[plugin.manifest.id] = False
+        self._record_plugin_tool_origins(
+            row.agent_id,
+            plugin_tools,
+            agent_plugins=mount_plugins,
+            global_plugins=effective_plugins,
+        )
         # Plugin authors may register tools with non-ASCII (e.g. Chinese) names,
         # which strict LLM tool-name APIs reject. Rewrite them to legal names
         # before binding, keeping the original in the description. Config keys
@@ -3845,7 +4544,8 @@ class AgentManager:
             reserved={
                 str(getattr(t, "name", ""))
                 for t in [*(cron_tools or []), *knowledge_tools, *mobile_tools]
-            },
+            }
+            | {"tool_search"},
         )
         self._plugin_tool_labels[row.agent_id] = {
             str(getattr(tool, "name", "")): label
@@ -3895,6 +4595,19 @@ class AgentManager:
             ),
             OctopUiOffloadMiddleware(),
         ]
+        if self._plugin_host is not None and self._team_processor is not None:
+            from octop.infra.agents.teams.team_manager import (
+                PeerDispatchAuthorizationMiddleware,
+            )
+
+            team = getattr(self._harness_manager, "team", None)
+            if team is not None:
+                agent_middleware.append(
+                    PeerDispatchAuthorizationMiddleware(
+                        team,
+                        self._plugin_host.authorize_peer_dispatch,
+                    )
+                )
 
         merged_tools: list[Any] = []
         if cron_tools:
@@ -4133,6 +4846,9 @@ class AgentManager:
             stream_host=getattr(room, "stream_host_followup_to_room", None),
             take_prompt=getattr(room, "take_peer_prompt", None)
             or getattr(proc, "take_team_peer_prompt", None),
+            authorize_peer_dispatch=(
+                self._plugin_host.authorize_peer_dispatch if self._plugin_host is not None else None
+            ),
         )
 
     def _agently_write_interrupts(self, user_id: int | None) -> dict[str, Any]:

@@ -31,6 +31,7 @@ import { message } from "../../../../utils/antdMessage";
 import { apiErrorMessage } from "../../../../utils/apiError";
 import pluginStyles from "../../../Admin/Plugins/index.module.less";
 import styles from "./AgentPluginsPanel.module.less";
+import { notifyPluginsChanged } from "../../../../plugins/pluginsEvents";
 
 const GROUP_ALL = "all";
 
@@ -137,6 +138,7 @@ export default function AgentPluginsPanel({ agentId }: AgentPluginsPanelProps) {
         [plugin.id]: { enabled },
       });
       setPlugins(result.plugins);
+      notifyPluginsChanged();
       message.success(t("plugins.saved"));
     } catch (error) {
       message.error(apiErrorMessage(error, t("plugins.saveFailed"), t));
@@ -149,6 +151,7 @@ export default function AgentPluginsPanel({ agentId }: AgentPluginsPanelProps) {
     if (!agentId) return;
     await pluginsApi.patchAgentTools(agentId, toolsConfig(next));
     setTools(next);
+    notifyPluginsChanged();
   };
 
   const toggleTool = async (tool: AgentPluginTool, enabled: boolean) => {

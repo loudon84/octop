@@ -162,8 +162,14 @@ class InviteService:
         locale: str | None,
         register_user: Callable[[User], None],
         email: str | None = None,
+        registration_policy: Any | None = None,
     ) -> User:
-        from octop.infra.users.email import parse_optional_email
+        from octop.i18n.domains.errors import error_message
+        from octop.infra.users.registration_policy import (
+            is_email_unique_violation,
+            load_registration_policy,
+            validate_registration_email,
+        )
 
         cleaned_code = (code or "").strip()
         cleaned_username = (username or "").strip()
@@ -176,7 +182,8 @@ class InviteService:
         name = display_name.strip() if isinstance(display_name, str) else None
         if name == "":
             name = None
-        normalized_email = parse_optional_email(email)
+        policy = registration_policy or load_registration_policy(self._services.settings_repo)
+        normalized_email = validate_registration_email(email, policy)
         account_role, perm_list, policy_pairs, role_name = _role_defaults_for_invite(
             self._services.db,
             self._repo.get_by_code(cleaned_code),
@@ -206,7 +213,9 @@ class InviteService:
             if reason == "email_taken":
                 raise OctopError(
                     ErrorCode.EMAIL_TAKEN,
-                    f"email {normalized_email!r} already exists",
+                    error_message("EMAIL_TAKEN")
+                    if policy.email_required
+                    else f"email {normalized_email!r} already exists",
                 ) from exc
             if reason == "used":
                 raise OctopError(ErrorCode.INVITE_USED, "invite already used") from exc
@@ -215,6 +224,10 @@ class InviteService:
             if reason == "revoked":
                 raise OctopError(ErrorCode.INVITE_REVOKED, "invite revoked") from exc
             raise OctopError(ErrorCode.INVITE_INVALID, "invite not usable") from exc
+        except Exception as exc:
+            if normalized_email is not None and is_email_unique_violation(exc):
+                raise OctopError(ErrorCode.EMAIL_TAKEN, error_message("EMAIL_TAKEN")) from exc
+            raise
 
         user = User(
             id=user_id,

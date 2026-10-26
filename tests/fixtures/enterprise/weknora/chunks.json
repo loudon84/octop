@@ -1,0 +1,17 @@
+{
+  "success": true,
+  "data": [
+    {
+      "id": "chunk-synthetic-1",
+      "knowledge_id": "knowledge-synthetic-1",
+      "knowledge_base_id": "kb-synthetic-a",
+      "chunk_index": 0,
+      "chunk_type": "text",
+      "content": "Synthetic chunk body.",
+      "content_revision": 1
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "page_size": 10
+}

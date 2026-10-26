@@ -87,7 +87,22 @@ export interface MarketPlugin {
   error?: string;
 }
 
+export interface PluginRequirements {
+  api_version: 1;
+  required_plugins: Record<string, string>;
+  unavailable_plugins: string[];
+}
+
 export const pluginsApi = {
+  requirements(
+    agentId: string,
+    threadId?: string | null,
+  ): Promise<PluginRequirements> {
+    const query = new URLSearchParams({ agent_id: agentId });
+    if (threadId) query.set("thread_id", threadId);
+    return request<PluginRequirements>(`/plugins/requirements?${query}`);
+  },
+
   list(): Promise<InstalledPlugin[]> {
     return request<InstalledPlugin[]>("/plugins");
   },

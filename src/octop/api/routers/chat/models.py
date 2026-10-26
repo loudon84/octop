@@ -43,6 +43,10 @@ class ChatTurnBody(BaseModel):
         default=None,
         description="Knowledge base ids to retrieve for this request (empty disables defaults).",
     )
+    plugin_context: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description="Plugin namespaced JSON context for this turn.",
+    )
     skills: list[str] | None = Field(
         default=None,
         description="Skill names to enable for this request (empty list disables all skills).",
@@ -101,6 +105,9 @@ class ChatTurnBody(BaseModel):
             knowledge_base_ids=payload.get("knowledge_base_ids")
             if isinstance(payload.get("knowledge_base_ids"), list)
             else None,
+            plugin_context=payload.get("plugin_context")
+            if isinstance(payload.get("plugin_context"), dict)
+            else None,
             skills=payload.get("skills")
             if isinstance(payload.get("skills"), list)
             else payload.get("skills"),
@@ -155,6 +162,7 @@ class UserTurnWsFrame(BaseModel):
     hitl_policy: HitlSessionPolicyBody | None = None
     mcp_servers: list[str] | None = None
     knowledge_base_ids: list[str] | None = None
+    plugin_context: dict[str, dict[str, Any]] | None = None
     skills: list[str] | None = None
     messages: list[dict[str, Any]] | None = None
     target_agent_ids: list[str] | None = None

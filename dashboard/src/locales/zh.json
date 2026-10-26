@@ -100,6 +100,9 @@
     "USERNAME_TAKEN": "用户名已被占用。",
     "EMAIL_TAKEN": "邮箱已被占用。",
     "EMAIL_INVALID": "邮箱格式不正确。",
+    "EMAIL_REQUIRED": "必须提供有效邮箱。",
+    "REGISTRATION_POLICY_INVALID": "注册策略不可用或无效。",
+    "REGISTRATION_POLICY_CONFLICT": "启用此策略前，现有邮箱必须有效、规范且唯一。",
     "PASSWORD_SAME_AS_OLD": "新密码不能与当前密码相同。",
     "PASSWORD_NOT_SET": "该账号通过目录服务登录，没有可修改的本地密码。",
     "PASSWORD_TOO_WEAK": "密码过弱：至少 8 位，且同时包含字母和数字。",
@@ -185,6 +188,9 @@
     "PLUGIN_INVALID_ARCHIVE": "下载内容不是有效的插件 ZIP。请使用直接的 .zip 下载地址（GitHub 请用 raw.githubusercontent.com 或 “Download/raw” 链接，不要用 /blob/ 页面地址）。",
     "PLUGIN_INSTALL_FAILED": "下载或安装插件失败：{{reason}}",
     "PLUGIN_ALREADY_EXISTS": "插件 {{id}} 已安装。",
+    "PLUGIN_HOST_UNAVAILABLE": "插件操作暂时不可用。",
+    "PLUGIN_ACTION_INVALID": "插件操作请求无效。",
+    "PLUGIN_STATE_CONFLICT": "插件状态已更改，请刷新后重试。",
     "KNOWLEDGE_FEATURE_DISABLED": "管理员尚未启用知识库功能。",
     "KNOWLEDGE_PREREQUISITES_RESTART_REQUIRED": "知识库的向量模型或依赖已安装，但当前进程还加载不到，需要重启服务后生效。",
     "KNOWLEDGE_PREREQUISITES_FAILED": "知识库的向量模型或依赖尚未就绪。",
@@ -1453,7 +1459,10 @@
       "attachmentsOnly": "{{count}} 个附件",
       "attachmentCount": "{{count}} 个附件",
       "emptyItem": "排队消息",
-      "flushFailed": "排队消息发送失败，已放回队列。"
+      "flushFailed": "排队消息发送失败，已放回队列。",
+      "sending": "正在发送",
+      "blocked": "发送受阻。准备好后可取回编辑并重试。",
+      "uncertain": "发送结果不确定。重试前请先检查会话历史。"
     },
     "agentNoDescription": "暂无描述",
     "noSessionsYet": "直接发消息即可开始对话",
@@ -6544,6 +6553,17 @@
     "chatPermissionTitle": "外部专家需要权限确认"
   },
   "plugins": {
+    "surface": {
+      "title": "插件设置",
+      "loading": "正在加载插件设置…",
+      "error": "插件设置暂时不可用。"
+    },
+    "readiness": {
+      "loading": "正在检查必需插件…",
+      "error": "无法检查必需插件状态。请重试后再使用插件功能。",
+      "denied": "无权检查必需插件状态。",
+      "unavailable": "必需插件不可用：{{plugins}}。插件功能尚未就绪。"
+    },
     "loadError": "加载插件失败",
     "saveFailed": "保存失败",
     "saved": "已保存",

@@ -55,6 +55,7 @@ class PreparedDashboardTurn:
     inbound_content: list[ContentPart]
     composer_context: dict[str, Any] | None
     inbound_attachments: list[dict[str, str]]
+    execution_ticket: Any | None = None
 
 
 async def resolve_thread_id(
@@ -76,6 +77,11 @@ async def resolve_thread_id(
         return thread_id, sk
     bound = thread_registry.get_bound_thread_id(sk)
     if bound:
+        row = thread_registry.get_thread(bound)
+        if row is None or row.agent_id != agent_id:
+            raise OctopError(ErrorCode.AGENT_NOT_FOUND, f"thread {bound!r} not found")
+        if row.user_id != user_id:
+            raise OctopError(ErrorCode.FORBIDDEN, "thread not owned by user")
         return bound, sk
     tid = await thread_registry.get_or_create_by_key(
         session_key=sk,
@@ -281,6 +287,36 @@ async def prepare_dashboard_turn(
         composer_updates["reasoning_effort"] = turn.reasoning_effort.strip().lower() or None
     if composer_updates:
         thread_registry.update_composer(thread_id, **composer_updates)
+    execution_ticket = None
+    plugin_host = getattr(server, "plugin_host", None)
+    if plugin_host is not None:
+        from octop.infra.agents.plugins.execution import issue_execution_ticket
+        from octop.infra.agents.plugins.host_contracts import PluginActor
+
+        actor = PluginActor(
+            user_id=user.id,
+            is_admin=bool(getattr(user, "is_admin", False)),
+            permissions=frozenset(getattr(user, "permissions", ()) or ()),
+            agent_id=agent_id,
+            thread_id=thread_id,
+            locale=str(getattr(user, "locale", "en") or "en"),
+        )
+        execution_ticket = issue_execution_ticket(
+            plugin_host,
+            actor,
+            plugin_context=turn.plugin_context,
+        )
+        try:
+            from octop.infra.agents.plugins.host_contracts import PluginHostError
+
+            await plugin_host.authorize_execution(
+                execution_ticket,
+                agent_id=agent_id,
+                thread_id=thread_id,
+                execution_kind="turn",
+            )
+        except PluginHostError:
+            raise OctopError(ErrorCode.FORBIDDEN, "plugin execution unavailable") from None
     target_ids = [str(x) for x in turn.target_agent_ids] if turn.target_agent_ids else None
     composer_ctx = build_composer_context(
         mcp_servers=mcp_servers,
@@ -300,6 +336,7 @@ async def prepare_dashboard_turn(
         inbound_content=inbound_content,
         composer_context=composer_ctx,
         inbound_attachments=inbound_attachments,
+        execution_ticket=execution_ticket,
     )
 
 
@@ -324,6 +361,8 @@ def build_dashboard_inbound(
     if turn.knowledge_base_ids is not None:
         # Including [] — Dashboard opt-out of default_open knowledge bases for this turn.
         metadata["knowledge_base_ids"] = list(turn.knowledge_base_ids)
+    if turn.plugin_context is not None:
+        metadata["plugin_context"] = turn.plugin_context
     if prepared.skills is not None:
         metadata["skills"] = prepared.skills
     if prepared.model_ref:
@@ -341,6 +380,11 @@ def build_dashboard_inbound(
     if prepared.inbound_attachments:
         metadata[INBOUND_ATTACHMENTS_KEY] = prepared.inbound_attachments
     merge_turn_target_agents(turn, metadata)
+
+    if prepared.execution_ticket is not None:
+        from octop.infra.agents.plugins.execution import ticket_metadata
+
+        metadata.update(ticket_metadata(prepared.execution_ticket))
 
     return InboundMessage(
         channel_id=WS_CHANNEL_ID,

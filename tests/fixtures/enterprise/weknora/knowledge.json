@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "data": {
+    "id": "knowledge-synthetic-1",
+    "knowledge_base_id": "kb-synthetic-a",
+    "title": "Synthetic document",
+    "source": "manual",
+    "file_hash": "synthetic-hash",
+    "updated_at": "2026-10-24T00:00:00Z"
+  }
+}

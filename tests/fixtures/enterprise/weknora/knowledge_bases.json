@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": [
+    {
+      "id": "kb-synthetic-a",
+      "name": "Synthetic Knowledge Base",
+      "type": "document",
+      "description": "Synthetic v0.8.3 contract fixture",
+      "tenant_id": "tenant-synthetic",
+      "creator_id": "synthetic-creator",
+      "knowledge_count": 1,
+      "chunk_count": 2
+    }
+  ]
+}
