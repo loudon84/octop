@@ -105,3 +105,4 @@ In chat, select the Composio MCP server explicitly; IM/Cron do not auto-inject i
 
 - [Agent Mail CLI](connectors-agently-mail.md)
 - [Qichacha / 企查查](connectors-qcc.md)
+- [WeKnora 私有知识库](connectors-weknora.md)
