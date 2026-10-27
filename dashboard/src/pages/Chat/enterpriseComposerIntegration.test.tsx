@@ -153,6 +153,8 @@ const backend = vi.hoisted(() => ({
   actionCalls: [] as { name: string; body: Record<string, unknown> }[],
   resumeBodies: [] as Record<string, unknown>[],
   nextOperation: 1,
+  requiredPlugins: {} as Record<string, string>,
+  sessionCreateCalls: 0,
 }));
 
 class FakeWebSocket {
@@ -350,7 +352,7 @@ function installHttpBoundary() {
 function pluginReady(_target: PluginReadinessTarget) {
   return Promise.resolve({
     status: "ready" as const,
-    requiredPlugins: { [PLUGIN_ID]: "1" },
+    requiredPlugins: backend.requiredPlugins,
     unavailablePlugins: [],
   });
 }
@@ -360,8 +362,16 @@ type HarnessProbe = {
   sentTurnCount: number;
 };
 
-function Harness({ probe }: { probe: { current: HarnessProbe | null } }) {
-  const chat = useChat(THREAD_ID, AGENT_ID);
+function Harness({
+  probe,
+  newChat = false,
+  readinessStatus = "ready",
+}: {
+  probe: { current: HarnessProbe | null };
+  newChat?: boolean;
+  readinessStatus?: "ready" | "loading" | "error";
+}) {
+  const chat = useChat(newChat ? null : THREAD_ID, AGENT_ID);
   const queue = useChatMessageQueue({
     agentId: AGENT_ID,
     threadId: THREAD_ID,
@@ -379,7 +389,7 @@ function Harness({ probe }: { probe: { current: HarnessProbe | null } }) {
   });
   const send = useChatSend({
     resolvedAgentId: AGENT_ID,
-    activeThreadId: THREAD_ID,
+    activeThreadId: newChat ? null : THREAD_ID,
     sessions: [],
     messagesLength: chat.messages.length,
     selectedModel: null,
@@ -388,10 +398,13 @@ function Harness({ probe }: { probe: { current: HarnessProbe | null } }) {
     reasoningMode: "auto",
     reasoningEffort: null,
     sendMessage: chat.sendMessage,
-    createSession: () => ({
-      session: {} as never,
-      resolvedId: Promise.resolve(THREAD_ID),
-    }),
+    createSession: () => {
+      backend.sessionCreateCalls += 1;
+      return {
+        session: {} as never,
+        resolvedId: Promise.resolve(THREAD_ID),
+      };
+    },
     refreshPluginReadiness: pluginReady,
     enqueuePrepared: queue.enqueueForTarget,
     requestPreparedFlush: queue.requestFlush,
@@ -417,7 +430,7 @@ function Harness({ probe }: { probe: { current: HarnessProbe | null } }) {
     routeGuardedChatSend({
       text,
       attachments,
-      activeThreadId: THREAD_ID,
+      activeThreadId: newChat ? null : THREAD_ID,
       pendingAsk,
       hasPendingHitlPause: hasPendingHitl(chat.messages),
       findPendingAskForThread: () => null,
@@ -431,7 +444,24 @@ function Harness({ probe }: { probe: { current: HarnessProbe | null } }) {
     });
   return (
     <>
-      <PluginSurface surface="composer" location="chat" context={CONTEXT} />
+      <PluginSurface
+        surface="composer"
+        location="chat"
+        context={{
+          ...CONTEXT,
+          threadId: newChat ? null : THREAD_ID,
+          readiness:
+            readinessStatus === "ready"
+              ? {
+                  status: "ready",
+                  requiredPlugins: backend.requiredPlugins,
+                  unavailablePlugins: [],
+                }
+              : readinessStatus === "loading"
+              ? { status: "loading" }
+              : { status: "error", reason: "unavailable" },
+        }}
+      />
       <ChatInput
         onSend={onSend}
         onQueue={(item, lease) =>
@@ -446,7 +476,7 @@ function Harness({ probe }: { probe: { current: HarnessProbe | null } }) {
         onNewChat={() => {}}
         isStreaming={chat.isStreaming}
         agentId={AGENT_ID}
-        threadId={THREAD_ID}
+        threadId={newChat ? null : THREAD_ID}
       />
     </>
   );
@@ -508,6 +538,8 @@ describe("enterprise Composer Host integration", () => {
     backend.actionCalls = [];
     backend.resumeBodies = [];
     backend.nextOperation = 1;
+    backend.requiredPlugins = { [PLUGIN_ID]: "1" };
+    backend.sessionCreateCalls = 0;
     setReactBridge();
     vi.stubGlobal("BASE_URL", "");
     vi.stubGlobal("WebSocket", FakeWebSocket);
@@ -522,15 +554,70 @@ describe("enterprise Composer Host integration", () => {
     disposePlugin = setupEnterpriseKnowledge(registrationHost);
   });
 
-  afterEach(() => {
-    disposePlugin?.();
-    disposePlugin = undefined;
-    for (const socket of FakeWebSocket.instances) socket.close();
-    chatStore.cancelStream(THREAD_ID);
-    chatStore.removeSession(THREAD_ID);
+  afterEach(async () => {
+    await act(async () => {
+      disposePlugin?.();
+      disposePlugin = undefined;
+      for (const socket of FakeWebSocket.instances) socket.close();
+      chatStore.cancelStream(THREAD_ID);
+      chatStore.removeSession(THREAD_ID);
+    });
     Reflect.deleteProperty(window, "__OCTOP_REACT__");
     Reflect.deleteProperty(window, "__OCTOP_JSX__");
     vi.unstubAllGlobals();
+  });
+
+  it("sends a first ordinary message once when the global plugin is unbound", async () => {
+    backend.requiredPlugins = {};
+    const probe = { current: null as HarnessProbe | null };
+    render(
+      <MemoryRouter>
+        <Harness probe={probe} newChat />
+      </MemoryRouter>,
+    );
+
+    await submit("ordinary first message");
+    await waitFor(() => expect(turns()).toHaveLength(1));
+
+    expect(backend.sessionCreateCalls).toBe(1);
+    expect(turns()[0]).toMatchObject({ text: "ordinary first message" });
+    expect(turns()[0]).not.toHaveProperty("plugin_context");
+    expect(backend.actionCalls).toEqual([]);
+    expect(backend.operations).toEqual([]);
+  });
+
+  it("preserves the knowledge draft during same-scope readiness polling", async () => {
+    const probe = { current: null as HarnessProbe | null };
+    const rendered = render(
+      <MemoryRouter>
+        <Harness probe={probe} />
+      </MemoryRouter>,
+    );
+    await screen.findByText("Library A");
+    const libraryB = screen.getByLabelText("Library B") as HTMLInputElement;
+    fireEvent.click(libraryB);
+    expect(libraryB.checked).toBe(true);
+
+    rendered.rerender(
+      <MemoryRouter>
+        <Harness probe={probe} readinessStatus="loading" />
+      </MemoryRouter>,
+    );
+    expect(
+      (screen.getByLabelText("Library B") as HTMLInputElement).checked,
+    ).toBe(true);
+
+    rendered.rerender(
+      <MemoryRouter>
+        <Harness probe={probe} readinessStatus="error" />
+      </MemoryRouter>,
+    );
+    expect(
+      (screen.getByLabelText("Library B") as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(
+      screen.getByRole("button", { name: /save selection/i }),
+    ).toBeTruthy();
   });
 
   it("prepares distinct busy queue items from their captured library snapshots and flushes FIFO without cancelling the active turn", async () => {

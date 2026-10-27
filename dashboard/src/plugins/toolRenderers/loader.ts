@@ -48,7 +48,7 @@ async function fetchAuthedText(path: string): Promise<string> {
   const token = getAuthToken();
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, { headers, cache: "no-store" });
   if (!res.ok) {
     throw new Error(`plugin UI fetch failed: ${res.status} ${path}`);
   }

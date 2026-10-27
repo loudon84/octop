@@ -5,6 +5,25 @@ export interface PluginSurfaceContext {
   theme: "light" | "dark";
   generation: string;
   timeZone: string;
+  readiness?: PluginReadinessState;
+}
+
+export type PluginReadinessState =
+  | { readonly status: "loading" }
+  | {
+      readonly status: "ready";
+      readonly requiredPlugins: Readonly<Record<string, string>>;
+      readonly unavailablePlugins: readonly string[];
+    }
+  | {
+      readonly status: "error";
+      readonly reason: "unavailable" | "denied";
+    };
+
+export interface PluginSurfaceProps {
+  host: PluginHost;
+  context: PluginSurfaceContext;
+  location?: "connectors" | "expert" | "chat";
 }
 
 export type PluginJson =

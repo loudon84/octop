@@ -141,3 +141,12 @@ reader 同时最多一个 read 在途，并在 await/React提交前同步占位�
 Existing live locale/theme behavior is refined by the independently reviewed `prd/evidence/enterprise-p1/tool-presentation-context-contract.md`: an internal optional getter supplies only current locale/theme while captured agent/thread/auth/registration/one-use authority remains fixed. A reactive ThemeProvider and current language notify mounted memo renderers through an ordinary presentation prop update; Host/activation/reader/continuation do not reset. Exact Core delta is three source paths and one integration test, frozen separately. This planning acceptance does not complete UI4.1 or actual browser verification.
 
 HITL输入框答复保留findPendingAsk取得的服务端pending_id，并通过通用路由显式映射至现有resume hook的pendingId参数。已展示旧pause不得隐式改答最新pause；不加客户端plugin_context，服务端仍从原continuation恢复并重新授权。无ID的legacy调用保持兼容，过期ID由既有后端拒绝。
+### 2026-10-27 empty Agent regression refinement
+
+ChatComposerTools gates the readiness notice and composer PluginSurface on the resolved Agent ID. An absent target is not an in-flight requirements request. The readiness hook keeps its existing non-ready semantics, and the native child/input remains mounted so selecting an Agent preserves drafts. This is a generic Host presentation rule with no enterprise IDs. A selected Agent still displays pending/error/unavailable readiness normally. No Agent/provider is created automatically.
+
+### 2026-10-27 catalog feedback regression refinement
+
+The plugin Settings catalog controls display request feedback adjacent to the initiating control, separately from the selected allowed-set validation. Loading, loaded count, empty credential-visible catalog, and sanitized retryable failure are distinct states for connection and expert binding targets. Request state is bound to target connection/revision and semantic generation; equivalent presentation renders preserve it while actual target/revision changes invalidate it. No new backend endpoint, scope expansion, automatic save, or WeKnora writes are introduced.
+
+Browser acceptance exposed an additional deployment obstacle: the same-version plugin entry was served from disk cache after overwrite (145188 old bytes versus 149758 current bytes), including after Page.reload(ignoreCache=true). The generic Host fetch for an installed UI entry therefore uses cache:no-store. This affects only executable plugin UI text fetches and retains authentication, inventory lifecycle, and module isolation. No cache-clearing or permanent browser setting is required.

@@ -421,23 +421,27 @@ export function ChatComposerTools(props: {
   const pluginUi = usePluginToolUis({ agentId, threadId: pluginThreadId });
   return (
     <>
-      <PluginReadinessNotice
-        readiness={pluginUi.readiness}
-        onRetry={() => void pluginUi.refresh()}
-      />
-      <PluginSurface
-        surface="composer"
-        location="chat"
-        context={{
-          agentId,
-          threadId: pluginThreadId,
-          locale,
-          theme,
-          generation: pluginUi.generation,
-          timeZone,
-          readiness: pluginUi.readiness,
-        }}
-      />
+      {agentId && (
+        <>
+          <PluginReadinessNotice
+            readiness={pluginUi.readiness}
+            onRetry={() => void pluginUi.refresh()}
+          />
+          <PluginSurface
+            surface="composer"
+            location="chat"
+            context={{
+              agentId,
+              threadId: pluginThreadId,
+              locale,
+              theme,
+              generation: pluginUi.generation,
+              timeZone,
+              readiness: pluginUi.readiness,
+            }}
+          />
+        </>
+      )}
       {children({
         agentId,
         readiness: pluginUi.readiness,

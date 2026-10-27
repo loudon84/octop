@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { setup } from "./index";
 import type {
   PluginHost,
@@ -40,7 +40,11 @@ function registerSettingsSurface() {
       }) => unknown)
     | undefined;
   let composer:
-    | ((props: { host: PluginHost; context: PluginSurfaceContext }) => unknown)
+    | ((props: {
+        host: PluginHost;
+        context: PluginSurfaceContext;
+        location?: "connectors" | "expert" | "chat";
+      }) => unknown)
     | undefined;
   let renderer: ((props: PluginToolProps) => unknown) | undefined;
   const registrationRequest = vi.fn(async () => {
@@ -62,7 +66,12 @@ function registerSettingsSurface() {
   expect(surface).toBeDefined();
   expect(composer).toBeDefined();
   expect(renderer).toBeDefined();
-  return { surface: surface!, renderer: renderer!, registrationRequest };
+  return {
+    surface: surface!,
+    composer: composer!,
+    renderer: renderer!,
+    registrationRequest,
+  };
 }
 
 function mountedHost(
@@ -318,4 +327,132 @@ it("mounts the registered renderer from setup and lists evidence through its mou
       operation_id: "11111111-1111-4111-8111-111111111111",
     },
   });
+});
+
+it("keeps an unbound global composer out of ordinary turns", async () => {
+  await setupGlobals();
+  const { composer } = registerSettingsSurface();
+  const readiness = {
+    status: "ready",
+    requiredPlugins: {},
+    unavailablePlugins: [],
+  } as const;
+  const scopedContext = { ...context, readiness } as PluginSurfaceContext;
+  const registerComposerPreparation = vi.fn(() => vi.fn());
+  const host: PluginHost = {
+    getContext: () => scopedContext,
+    request: async <T,>() => ({}) as T,
+    registerSurface: () => () => undefined,
+    registerComposerPreparation,
+  };
+
+  render(
+    composer({
+      host,
+      context: scopedContext,
+      location: "chat",
+    }) as React.ReactElement,
+  );
+  await act(async () => {});
+
+  expect(registerComposerPreparation).not.toHaveBeenCalled();
+});
+
+it("keeps a confirmed composer mounted during same-scope readiness polling", async () => {
+  await setupGlobals();
+  const { composer } = registerSettingsSurface();
+  let readiness: PluginSurfaceContext["readiness"] = {
+    status: "ready",
+    requiredPlugins: { "enterprise-knowledge": "1" },
+    unavailablePlugins: [],
+  };
+  const scopedContext = () => ({ ...context, readiness });
+  const disposePreparation = vi.fn();
+  const registerComposerPreparation = vi.fn(() => disposePreparation);
+  const host: PluginHost = {
+    getContext: scopedContext,
+    request: async <T,>() => ({}) as T,
+    registerSurface: () => () => undefined,
+    registerComposerPreparation,
+  };
+  const rendered = render(
+    composer({
+      host,
+      context: scopedContext(),
+      location: "chat",
+    }) as React.ReactElement,
+  );
+  await waitFor(() =>
+    expect(registerComposerPreparation).toHaveBeenCalledOnce(),
+  );
+
+  readiness = { status: "loading" };
+  rendered.rerender(
+    composer({
+      host,
+      context: scopedContext(),
+      location: "chat",
+    }) as React.ReactElement,
+  );
+  readiness = { status: "error", reason: "unavailable" };
+  rendered.rerender(
+    composer({
+      host,
+      context: scopedContext(),
+      location: "chat",
+    }) as React.ReactElement,
+  );
+  await act(async () => {});
+
+  expect(registerComposerPreparation).toHaveBeenCalledOnce();
+  expect(disposePreparation).not.toHaveBeenCalled();
+});
+
+it("does not carry composer participation into a replacement scope", async () => {
+  await setupGlobals();
+  const { composer } = registerSettingsSurface();
+  const disposePreparation = vi.fn();
+  const registerComposerPreparation = vi.fn(() => disposePreparation);
+  const host: PluginHost = {
+    getContext: () => context,
+    request: async <T,>() => ({}) as T,
+    registerSurface: () => () => undefined,
+    registerComposerPreparation,
+  };
+  const boundContext = {
+    ...context,
+    readiness: {
+      status: "ready",
+      requiredPlugins: { "enterprise-knowledge": "1" },
+      unavailablePlugins: [],
+    },
+  } as PluginSurfaceContext;
+  const rendered = render(
+    composer({
+      host,
+      context: boundContext,
+      location: "chat",
+    }) as React.ReactElement,
+  );
+  await waitFor(() =>
+    expect(registerComposerPreparation).toHaveBeenCalledOnce(),
+  );
+
+  const replacementContext = {
+    ...context,
+    agentId: "expert-replacement",
+    generation: "replacement-generation",
+    readiness: { status: "loading" },
+  } as PluginSurfaceContext;
+  rendered.rerender(
+    composer({
+      host,
+      context: replacementContext,
+      location: "chat",
+    }) as React.ReactElement,
+  );
+  await act(async () => {});
+
+  expect(registerComposerPreparation).toHaveBeenCalledOnce();
+  expect(disposePreparation).toHaveBeenCalledOnce();
 });

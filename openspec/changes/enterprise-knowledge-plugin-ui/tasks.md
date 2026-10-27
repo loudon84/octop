@@ -24,3 +24,8 @@
 - [x] 4.1 插件en/zh和服务器时区接入；验证locale parity、时间显示、键盘导航和读屏状态提示。
 - [x] 4.2 运行插件typecheck/lint/test/build与Dashboard tsc/lint/test/build；记录命令、结果和对应spec场景。
 - [x] 4.3 真实Windows走完管理→选库→提问→引用→续读→原文、三模式与禁用恢复；保存截图/操作证据，文本回退不作为UI完成。
+
+## 5. 无专家空状态回归（2026-10-27）
+
+- [x] 5.1 未解析出专家时不渲染 readiness notice/composer surfaces，保留 native children 和非 ready admission；定向回归无专家→选择专家→清空专家以及有专家的 loading/required-unavailable 状态，构建后真实页面验收并 review。无专家分支以定向回归验证，现场验收时用户已创建专家；详见排查记录。
+- [x] 5.2 修复加载授权知识库的局部反馈：连接/专家绑定区区分待加载、加载中、成功数量、成功空列表和失败，校验跨连接/版本迟到结果隔离及同版本插件脚本更新；定向回归、插件类型/构建、review及真实200空响应页面验收。

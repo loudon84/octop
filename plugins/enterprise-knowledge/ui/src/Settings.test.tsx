@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -75,6 +76,356 @@ const binding = {
 
 describe("Enterprise Knowledge settings surface", () => {
   afterEach(() => cleanup());
+
+  it("shows an explicit nearby empty catalog result for the selected connection", async () => {
+    await setupGlobals();
+    const host = {
+      getContext: () => context,
+      request: vi.fn(async (path: string) => {
+        if (path === "/auth/me") return { role: "admin", permissions: [] };
+        if (path.endsWith("/settings.get"))
+          return { api_version: 1, result: grants };
+        if (path.endsWith("/connection.catalog"))
+          return {
+            api_version: 1,
+            result: {
+              connection_id: "conn-1",
+              observed_revision: 4,
+              knowledge_bases: [],
+            },
+          };
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    };
+    const { Settings } = await import("./Settings");
+    render(
+      <Settings
+        host={host as never}
+        context={context as never}
+        location="connectors"
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load authorized knowledge bases" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "The current connection credentials have no visible knowledge bases. Check the source space, tenant, and access permissions.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("shows a local loading label, prevents duplicate catalog requests, then reports the loaded count", async () => {
+    await setupGlobals();
+    let resolveCatalog!: (value: unknown) => void;
+    const catalogResult = new Promise((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const host = {
+      getContext: () => context,
+      request: vi.fn(async (path: string) => {
+        if (path === "/auth/me") return { role: "admin", permissions: [] };
+        if (path.endsWith("/settings.get"))
+          return { api_version: 1, result: grants };
+        if (path.endsWith("/connection.catalog")) return catalogResult;
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    };
+    const { Settings } = await import("./Settings");
+    render(
+      <Settings
+        host={host as never}
+        context={context as never}
+        location="connectors"
+      />,
+    );
+
+    const button = await screen.findByRole("button", {
+      name: "Load authorized knowledge bases",
+    });
+    fireEvent.click(button);
+    expect(
+      screen.getByRole("button", { name: "Loading knowledge bases…" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Loading knowledge bases…" }));
+    expect(
+      host.request.mock.calls.filter(([path]) => path.endsWith("/connection.catalog")),
+    ).toHaveLength(1);
+
+    resolveCatalog({
+      api_version: 1,
+      result: {
+        connection_id: "conn-1",
+        observed_revision: 4,
+        knowledge_bases: [
+          { kb_id: "kb-a", name: "Finance" },
+          { kb_id: "kb-b", name: "Operations" },
+        ],
+      },
+    });
+    expect(await screen.findByText("Knowledge bases loaded: 2.")).toBeTruthy();
+  });
+
+  it("shows a nearby sanitized catalog failure and allows retry", async () => {
+    await setupGlobals();
+    let attempts = 0;
+    const host = {
+      getContext: () => context,
+      request: vi.fn(async (path: string) => {
+        if (path === "/auth/me") return { role: "admin", permissions: [] };
+        if (path.endsWith("/settings.get"))
+          return { api_version: 1, result: grants };
+        if (path.endsWith("/connection.catalog")) {
+          attempts += 1;
+          if (attempts === 1) throw new Error("sensitive upstream details");
+          return {
+            api_version: 1,
+            result: {
+              connection_id: "conn-1",
+              observed_revision: 4,
+              knowledge_bases: [{ kb_id: "kb-a", name: "Finance" }],
+            },
+          };
+        }
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    };
+    const { Settings } = await import("./Settings");
+    render(
+      <Settings
+        host={host as never}
+        context={context as never}
+        location="connectors"
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load authorized knowledge bases" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("status")
+          .some((item) =>
+            item.textContent?.includes("Knowledge bases could not be loaded. Retry."),
+          ),
+      ).toBe(true),
+    );
+    expect(screen.queryByText("sensitive upstream details")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Load authorized knowledge bases" }));
+    expect(await screen.findByText("Knowledge bases loaded: 1.")).toBeTruthy();
+    expect(attempts).toBe(2);
+  });
+
+  it("keeps the new connection loading feedback when an old catalog request finishes", async () => {
+    await setupGlobals();
+    let resolveFirst!: (value: unknown) => void;
+    let resolveSecond!: (value: unknown) => void;
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise((resolve) => {
+      resolveSecond = resolve;
+    });
+    const secondConnection = {
+      ...connection(2),
+      connection_id: "conn-2",
+      name: "Secondary",
+    };
+    const host = {
+      getContext: () => context,
+      request: vi.fn(async (path: string, init?: RequestInit) => {
+        if (path === "/auth/me") return { role: "admin", permissions: [] };
+        if (path.endsWith("/settings.get"))
+          return {
+            api_version: 1,
+            result: { ...grants, connections: [connection(), secondConnection] },
+          };
+        if (path.endsWith("/connection.catalog")) {
+          const payload = JSON.parse(String(init?.body)).payload;
+          return payload.connection_id === "conn-1" ? first : second;
+        }
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    };
+    const { Settings } = await import("./Settings");
+    render(
+      <Settings
+        host={host as never}
+        context={context as never}
+        location="connectors"
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load authorized knowledge bases" }),
+    );
+    fireEvent.change(screen.getByLabelText("Connection"), {
+      target: { value: "conn-2" },
+    });
+    expect(await screen.findByText("Knowledge catalog has not been loaded yet.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load authorized knowledge bases" }));
+    await act(async () => {
+      resolveFirst({
+        api_version: 1,
+        result: {
+          connection_id: "conn-1",
+          observed_revision: 4,
+          knowledge_bases: [{ kb_id: "old", name: "Old" }],
+        },
+      });
+    });
+    expect(
+      await screen.findByRole("button", { name: "Loading knowledge bases…" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("Knowledge bases loaded: 1.")).toBeNull();
+    await act(async () => {
+      resolveSecond({
+        api_version: 1,
+        result: {
+          connection_id: "conn-2",
+          observed_revision: 2,
+          knowledge_bases: [{ kb_id: "new", name: "New" }],
+        },
+      });
+    });
+    expect(await screen.findByText("Knowledge bases loaded: 1.")).toBeTruthy();
+  });
+
+  it("keeps the new expert binding loading feedback when an old binding catalog request finishes", async () => {
+    await setupGlobals();
+    let resolveFirst!: (value: unknown) => void;
+    let resolveSecond!: (value: unknown) => void;
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise((resolve) => {
+      resolveSecond = resolve;
+    });
+    const secondConnection = {
+      ...connection(2),
+      connection_id: "conn-2",
+      name: "Secondary",
+    };
+    const host = {
+      getContext: () => context,
+      request: vi.fn(async (path: string, init?: RequestInit) => {
+        if (path === "/auth/me") return { role: "admin", permissions: [] };
+        if (path.endsWith("/settings.get"))
+          return {
+            api_version: 1,
+            result: { ...grants, connections: [connection(), secondConnection] },
+          };
+        if (path.endsWith("/binding.get"))
+          return {
+            api_version: 1,
+            result: {
+              ...binding,
+              binding: { ...binding.binding, connection_ref: "conn-1" },
+            },
+          };
+        if (path.endsWith("/connection.catalog")) {
+          const payload = JSON.parse(String(init?.body)).payload;
+          return payload.connection_id === "conn-1" ? first : second;
+        }
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    };
+    const { Settings } = await import("./Settings");
+    render(
+      <Settings
+        host={host as never}
+        context={context as never}
+        location="expert"
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load authorized knowledge bases" }),
+    );
+    fireEvent.change(screen.getByLabelText("Knowledge connection"), {
+      target: { value: "conn-2" },
+    });
+    expect(await screen.findByText("Knowledge catalog has not been loaded yet.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Load authorized knowledge bases" }));
+    await act(async () => {
+      resolveFirst({
+        api_version: 1,
+        result: {
+          connection_id: "conn-1",
+          observed_revision: 4,
+          knowledge_bases: [{ kb_id: "old", name: "Old" }],
+        },
+      });
+    });
+    expect(
+      await screen.findByRole("button", { name: "Loading knowledge bases…" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("Knowledge bases loaded: 1.")).toBeNull();
+    await act(async () => {
+      resolveSecond({
+        api_version: 1,
+        result: {
+          connection_id: "conn-2",
+          observed_revision: 2,
+          knowledge_bases: [{ kb_id: "new", name: "New" }],
+        },
+      });
+    });
+    expect(await screen.findByText("Knowledge bases loaded: 1.")).toBeTruthy();
+  });
+
+  it("invalidates connection catalog feedback when saving creates a new revision", async () => {
+    await setupGlobals();
+    let resolveCatalog!: (value: unknown) => void;
+    const catalogResult = new Promise((resolve) => {
+      resolveCatalog = resolve;
+    });
+    const host = {
+      getContext: () => context,
+      request: vi.fn(async (path: string) => {
+        if (path === "/auth/me") return { role: "admin", permissions: [] };
+        if (path.endsWith("/settings.get"))
+          return { api_version: 1, result: grants };
+        if (path.endsWith("/connection.catalog")) return catalogResult;
+        if (path.endsWith("/connection.save"))
+          return { api_version: 1, result: { connection: connection(5) } };
+        throw new Error(`Unexpected request ${path}`);
+      }),
+    };
+    const { Settings } = await import("./Settings");
+    render(
+      <Settings
+        host={host as never}
+        context={context as never}
+        location="connectors"
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Load authorized knowledge bases" }),
+    );
+    fireEvent.change(screen.getByLabelText("Connection name"), {
+      target: { value: "Updated" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save connection" }));
+    await screen.findByText("Saved.");
+    expect(await screen.findByText("Knowledge catalog has not been loaded yet.")).toBeTruthy();
+    await act(async () => {
+      resolveCatalog({
+        api_version: 1,
+        result: {
+          connection_id: "conn-1",
+          observed_revision: 4,
+          knowledge_bases: [{ kb_id: "stale", name: "Stale" }],
+        },
+      });
+    });
+    expect(screen.queryByText("Knowledge bases loaded: 1.")).toBeNull();
+    expect(screen.getByText("Knowledge catalog has not been loaded yet.")).toBeTruthy();
+  });
 
   it("does zero management bootstrap calls for an ordinary employee", async () => {
     await setupGlobals();

@@ -62,11 +62,16 @@ describe("Chat composer plugin target", () => {
 
   it("uses the active Agent for readiness, plugin context and the native input when the route has no Agent", async () => {
     list.mockResolvedValue([]);
-    requirements.mockResolvedValue({
-      api_version: 1,
-      required_plugins: { policy: "1" },
-      unavailable_plugins: ["policy"],
-    });
+    let resolveRequirements!: (value: {
+      api_version: number;
+      required_plugins: Record<string, string>;
+      unavailable_plugins: string[];
+    }) => void;
+    requirements.mockReturnValue(
+      new Promise((resolve) => {
+        resolveRequirements = resolve;
+      }),
+    );
     const renderNative = ({ agentId }: { agentId: string | null }) => (
       <input
         aria-label="native chat input"
@@ -86,7 +91,12 @@ describe("Chat composer plugin target", () => {
         {renderNative}
       </ChatComposerTools>,
     );
-    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-context")).not.toBeInTheDocument();
+    expect(requirements).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("native chat input")).toHaveValue(
+      "prefilled prompt",
+    );
 
     view.rerender(
       <ChatComposerTools
@@ -103,6 +113,7 @@ describe("Chat composer plugin target", () => {
     await waitFor(() =>
       expect(requirements).toHaveBeenCalledWith("agent-active", null),
     );
+    expect(screen.getByRole("status")).toBeInTheDocument();
     expect(screen.getByTestId("composer-context")).toHaveAttribute(
       "data-thread",
       "",
@@ -115,7 +126,32 @@ describe("Chat composer plugin target", () => {
       "data-agent",
       "agent-active",
     );
+    await act(async () => {
+      resolveRequirements({
+        api_version: 1,
+        required_plugins: { policy: "1" },
+        unavailable_plugins: ["policy"],
+      });
+    });
     expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByLabelText("native chat input")).toHaveValue(
+      "prefilled prompt",
+    );
+
+    view.rerender(
+      <ChatComposerTools
+        routeAgentId={null}
+        activeAgentId={null}
+        threadId="__pending__"
+        locale="en"
+        theme="light"
+        timeZone="Asia/Shanghai"
+      >
+        {renderNative}
+      </ChatComposerTools>,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer-context")).not.toBeInTheDocument();
     expect(screen.getByLabelText("native chat input")).toHaveValue(
       "prefilled prompt",
     );

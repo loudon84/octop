@@ -65,6 +65,12 @@ type Draft = {
   enabled: boolean;
 };
 type ProbeState = { status: string; revision: number };
+type CatalogFeedback = {
+  key: string;
+  status: "loading" | "loaded" | "empty" | "error";
+  count?: number;
+  error?: string;
+};
 
 const emptyDraft = (): Draft => ({
   name: "",
@@ -176,6 +182,11 @@ export function Settings({ host, context, location }: SurfaceProps) {
   const [draft, setDraft] = React.useState<Draft>(emptyDraft);
   const [catalog, setCatalog] = React.useState<CatalogItem[]>([]);
   const [catalogLoadedFor, setCatalogLoadedFor] = React.useState("");
+  const [connectionCatalogFeedback, setConnectionCatalogFeedback] =
+    React.useState<CatalogFeedback | null>(null);
+  const [bindingCatalogFeedback, setBindingCatalogFeedback] =
+    React.useState<CatalogFeedback | null>(null);
+  const catalogRequests = React.useRef(new Set<string>());
   const [probeIds, setProbeIds] = React.useState<string[]>([]);
   const [probeQuery, setProbeQuery] = React.useState("");
   const [probeDocument, setProbeDocument] = React.useState("");
@@ -368,6 +379,38 @@ export function Settings({ host, context, location }: SurfaceProps) {
     id: connectionId,
     revision: selectedConnection?.revision ?? 0,
   };
+  const bindingConnectionRef = React.useRef({ id: "", revision: 0 });
+  bindingConnectionRef.current = {
+    id: bindingConnection,
+    revision:
+      settings?.connections.find(
+        (item) => item.connection_id === bindingConnection,
+      )?.revision ?? 0,
+  };
+  const catalogTargetEpochs = React.useRef({
+    connection: { signature: "", epoch: 0 },
+    binding: { signature: "", epoch: 0 },
+  });
+  const catalogTargetKeys = React.useRef({ connection: "", binding: "" });
+  const updateCatalogTargetKey = (
+    target: "connection" | "binding",
+    signature: string,
+  ) => {
+    const current = catalogTargetEpochs.current[target];
+    if (current.signature !== signature) {
+      current.signature = signature;
+      current.epoch += 1;
+    }
+    catalogTargetKeys.current[target] = `${signature}:target-${current.epoch}`;
+  };
+  updateCatalogTargetKey(
+    "connection",
+    `${key}:connection:${connectionId}:${selectedConnection?.revision ?? 0}`,
+  );
+  updateCatalogTargetKey(
+    "binding",
+    `${key}:binding:${bindingConnection}:${bindingConnectionRef.current.revision}`,
+  );
   const isAdmin = profile?.role === "admin";
   const canManageConnections = Boolean(
     settings?.capabilities.can_manage_connections && isAdmin,
@@ -385,8 +428,22 @@ export function Settings({ host, context, location }: SurfaceProps) {
     target: "connection" | "binding",
   ) => {
     if (!id) return;
-    const requestKey = `${key}:${target}:${id}:${revision}`;
-    if (target === "connection") setBusy("catalog");
+    const requestKey = catalogTargetKeys.current[target];
+    if (catalogRequests.current.has(requestKey)) return;
+    catalogRequests.current.add(requestKey);
+    const setFeedback =
+      target === "connection"
+        ? setConnectionCatalogFeedback
+        : setBindingCatalogFeedback;
+    const isCurrentTarget = () =>
+      generation.current === currentGeneration &&
+      (target === "connection"
+        ? selectedConnectionRef.current.id === id &&
+          selectedConnectionRef.current.revision === revision
+        : bindingConnectionRef.current.id === id &&
+          bindingConnectionRef.current.revision === revision) &&
+      requestKey === catalogTargetKeys.current[target];
+    setFeedback({ key: requestKey, status: "loading" });
     try {
       const result = await action<{
         connection_id: string;
@@ -396,40 +453,43 @@ export function Settings({ host, context, location }: SurfaceProps) {
         connection_id: id,
         expected_revision: revision,
       });
-      if (
-        generation.current !== currentGeneration ||
-        result.observed_revision !== revision ||
-        result.connection_id !== id
-      )
+      if (generation.current !== currentGeneration) return;
+      if (result.observed_revision !== revision || result.connection_id !== id) {
+        if (isCurrentTarget())
+          setFeedback({
+            key: requestKey,
+            status: "error",
+            error: errorCopy(new Error("Catalog response did not match"), locale),
+          });
         return;
+      }
       const items = result.knowledge_bases.map((item) => ({
         kb_id: String(item.kb_id),
         name: String(item.name),
       }));
-      if (
-        target === "connection" &&
-        selectedConnectionRef.current.id === id &&
-        selectedConnectionRef.current.revision === revision &&
-        requestKey === `${key}:connection:${id}:${revision}`
-      ) {
+      if (target === "connection" && isCurrentTarget()) {
         setCatalog(items);
         setCatalogLoadedFor(`${id}:${revision}`);
       }
-      if (
-        target === "binding" &&
-        bindingConnection === id &&
-        settings?.connections.find((item) => item.connection_id === id)
-          ?.revision === revision
-      ) {
+      if (target === "binding" && isCurrentTarget()) {
         setBindingCatalog(items);
         setBindingCatalogFor(`${id}:${revision}`);
       }
+      if (isCurrentTarget())
+        setFeedback({
+          key: requestKey,
+          status: items.length === 0 ? "empty" : "loaded",
+          count: items.length,
+        });
     } catch (caught) {
-      if (generation.current === currentGeneration)
-        setError(errorCopy(caught, locale));
+      if (isCurrentTarget())
+        setFeedback({
+          key: requestKey,
+          status: "error",
+          error: errorCopy(caught, locale),
+        });
     } finally {
-      if (target === "connection" && generation.current === currentGeneration)
-        setBusy("");
+      catalogRequests.current.delete(requestKey);
     }
   };
   const currentGeneration = generation.current;
@@ -764,6 +824,18 @@ export function Settings({ host, context, location }: SurfaceProps) {
     catalogLoadedFor === `${connectionId}:${connectionCatalogRevision}`;
   const bindingCatalogReady =
     bindingCatalogFor === `${bindingConnection}:${bindingCatalogRevision}`;
+  const currentConnectionCatalogFeedback =
+    connectionCatalogFeedback?.key === catalogTargetKeys.current.connection
+      ? connectionCatalogFeedback
+      : null;
+  const currentBindingCatalogFeedback =
+    bindingCatalogFeedback?.key === catalogTargetKeys.current.binding
+      ? bindingCatalogFeedback
+      : null;
+  const connectionCatalogLoading =
+    currentConnectionCatalogFeedback?.status === "loading";
+  const bindingCatalogLoading =
+    currentBindingCatalogFeedback?.status === "loading";
   const grantCatalogLoaded = probeReadyFor;
 
   return (
@@ -877,7 +949,7 @@ export function Settings({ host, context, location }: SurfaceProps) {
                 <>
                   <button
                     type="button"
-                    disabled={busy === "catalog"}
+                    disabled={connectionCatalogLoading}
                     onClick={() =>
                       void fetchCatalog(
                         selectedConnection.connection_id,
@@ -886,8 +958,21 @@ export function Settings({ host, context, location }: SurfaceProps) {
                       )
                     }
                   >
-                    {text("catalog")}
+                    {connectionCatalogLoading
+                      ? text("catalogLoading")
+                      : text("catalog")}
                   </button>
+                  <p role="status">
+                    {currentConnectionCatalogFeedback?.status === "loading"
+                      ? text("catalogLoading")
+                      : currentConnectionCatalogFeedback?.status === "loaded"
+                        ? `${text("catalogLoaded")}: ${currentConnectionCatalogFeedback.count}.`
+                        : currentConnectionCatalogFeedback?.status === "empty"
+                          ? text("catalogEmpty")
+                          : currentConnectionCatalogFeedback?.status === "error"
+                            ? `${text("catalogFailed")} ${currentConnectionCatalogFeedback.error}`
+                            : text("catalogNotLoaded")}
+                  </p>
                   <Checks
                     items={catalog}
                     selected={draft.allowed_kb_ids}
@@ -975,6 +1060,7 @@ export function Settings({ host, context, location }: SurfaceProps) {
                       type="button"
                       disabled={
                         Boolean(busy) ||
+                        connectionCatalogLoading ||
                         (component !== "LIST" && !probeReadyFor)
                       }
                       onClick={() => void runProbe(component)}
@@ -1128,6 +1214,7 @@ export function Settings({ host, context, location }: SurfaceProps) {
             {bindingConnection && isAdmin && (
               <button
                 type="button"
+                disabled={bindingCatalogLoading}
                 onClick={() =>
                   void fetchCatalog(
                     bindingConnection,
@@ -1136,8 +1223,23 @@ export function Settings({ host, context, location }: SurfaceProps) {
                   )
                 }
               >
-                {text("catalog")}
+                {bindingCatalogLoading
+                  ? text("catalogLoading")
+                  : text("catalog")}
               </button>
+            )}
+            {bindingConnection && isAdmin && (
+              <p role="status">
+                {currentBindingCatalogFeedback?.status === "loading"
+                  ? text("catalogLoading")
+                  : currentBindingCatalogFeedback?.status === "loaded"
+                    ? `${text("catalogLoaded")}: ${currentBindingCatalogFeedback.count}.`
+                    : currentBindingCatalogFeedback?.status === "empty"
+                      ? text("catalogEmpty")
+                      : currentBindingCatalogFeedback?.status === "error"
+                        ? `${text("catalogFailed")} ${currentBindingCatalogFeedback.error}`
+                        : text("catalogNotLoaded")}
+              </p>
             )}
             {bindingConnection && (
               <>

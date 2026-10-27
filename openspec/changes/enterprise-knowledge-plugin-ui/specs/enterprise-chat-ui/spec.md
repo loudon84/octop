@@ -111,6 +111,11 @@ The composer MUST show loading, unavailable, denied and configuration-conflict s
 ### Requirement: Generic readiness survives plugin removal
 The builtin chat shell MUST read authenticated generic requirement readiness without enterprise IDs. It SHALL render the blocker independently of unloaded plugin code, reconcile disabled or removed modules, and refresh before submission and on focus or lifecycle changes. Visible sessions SHALL refresh within 30 seconds. Read errors MUST NOT imply an unbound ready state; final backend admission remains authoritative.
 
+#### Scenario: No Agent exists or is selected
+- **WHEN** neither the chat route nor the active selection supplies an Agent
+- **THEN** the shell MUST NOT display a plugin readiness check or mount composer plugin surfaces; the existing create/select Agent guidance and disabled native input remain authoritative
+- **AND** readiness MUST NOT be promoted to ready merely because the target is absent; once an Agent is selected its requirements MUST be checked normally
+
 #### Scenario: Shared employee opens the composer
 - **WHEN** an employee accesses a shared Agent with their own thread
 - **THEN** readiness uses the generic authenticated read contract without requiring Agent-owner settings permission or leaking another employee's requirements

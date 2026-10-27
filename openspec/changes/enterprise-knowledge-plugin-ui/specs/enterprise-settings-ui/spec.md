@@ -62,6 +62,13 @@ Search settings MUST distinguish fixed primary/secondary roles, masked existing 
 ### Requirement: Accessible localized state feedback
 Applicable loading, empty, validation, success, denied, disabled, error and revision-conflict states MUST be visible and keyboard reachable. Business copy MUST support en/zh; timestamps MUST use server timezone and entered secrets MUST NOT persist in browser storage.
 
+#### Scenario: Administrator loads the knowledge catalog
+- **WHEN** an administrator loads a connection's or expert binding's authorized knowledge catalog
+- **THEN** the initiating control MUST expose loading and prevent duplicate requests; nearby localized feedback MUST distinguish not loaded, successful non-empty, successful empty, and failed results
+- **AND** a successful empty result MUST say the current connection credentials have no visible knowledge bases and suggest checking the source space/tenant and access; it MUST NOT imply that the entire WeKnora server is empty
+- **AND** switching connection or configuration revision MUST invalidate old feedback; late responses MUST NOT publish results or clear the new target's loading state
+- **AND** reloading the dashboard after a same-version plugin overwrite MUST obtain the current installed UI entry rather than reuse a fresh cached response from the previous installation
+
 #### Scenario: Keyboard save error
 - **WHEN** a keyboard user submits invalid fields
 - **THEN** focus moves to the first invalid field and a localized field error is announced without clearing safe edits
