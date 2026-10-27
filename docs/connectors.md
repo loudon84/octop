@@ -52,6 +52,7 @@ are updating `catalog.json` in the same change.
 | `qcc` | Qichacha | 企查查 | professional | oauth2 | internal |
 | `tencent-ardot` | Tencent Ardot | 腾讯设计 Ardot | office | oauth2 | remote |
 | `youdao-note` | Youdao Note | 有道云笔记 | knowledge | personal_token | remote |
+| `composio-connect` | Composio | Composio 云应用 | productivity | oauth2 | remote |
 | `notion` | Notion | Notion | knowledge | oauth2 | remote |
 | `openalex` | OpenAlex | OpenAlex | knowledge | oauth2 | remote |
 | `dida365` | TickTick | 滴答清单 | productivity | oauth2 | remote |
@@ -88,6 +89,17 @@ Optional: `quick_auth_url`, `login_url`, `guide_url`, `manual_url`, `auth_hint`,
 
 `credential_fields[]` items: `key`, `label`; optional `field_type` (`text` /
 `password` / `url` / `tags`), `required`, `placeholder`, `help`, `secret`.
+
+## Personal Composio Connect / 个人 Composio
+
+`composio-connect` binds **one personal Composio account per Octop user** to
+`https://connect.composio.dev/mcp`. OAuth credentials are saved on the server
+(never returned to the browser). Sharing and `default_open` are rejected.
+Dashboard tabs: Connected | Octop built-in | **Composio cloud apps** | Custom MCP.
+In chat, select the Composio MCP server explicitly; IM/Cron do not auto-inject it.
+
+每位 Octop 用户最多绑定一个个人 Composio；凭证仅服务端保存；禁止共享与默认开启。
+连接器页新增「Composio 云应用」页签；对话中需显式勾选，IM/Cron 不会自动带上。
 
 ## Deep dives / 深入说明
 
