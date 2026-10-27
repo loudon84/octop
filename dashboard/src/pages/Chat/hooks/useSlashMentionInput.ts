@@ -113,6 +113,7 @@ export function useSlashMentionInput({
     files: mentionFiles,
     loading: filesLoading,
     error: filesError,
+    truncated: filesTruncated,
   } = useWorkspaceFileMention(agentId, mentionMenuOpen, mentionQuery);
 
   const mentionItems = useMemo(
@@ -523,6 +524,7 @@ export function useSlashMentionInput({
     mentionItems,
     filesLoading,
     filesError,
+    filesTruncated,
     runSlashCommand,
     matchSlashCommand,
     handleMentionSelect,

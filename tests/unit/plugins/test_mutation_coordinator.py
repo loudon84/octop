@@ -9,6 +9,7 @@ import textwrap
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
@@ -73,13 +74,12 @@ async def test_real_sdk_url_archive_path_mutation_rebinds_only_initiator(tmp_pat
         plugins_dir=tmp_path / "plugins", config_path=tmp_path / "config.json", host=host
     )
 
-    def copy_archive(
-        _url: str, filename: str | Path, *_args: object, **_kwargs: object
-    ) -> tuple[str, None]:
-        shutil.copyfile(archive, filename)
-        return str(filename), None
+    def open_archive(_url: str, **_kwargs: object) -> BytesIO:
+        response = BytesIO(archive.read_bytes())
+        response.headers = {}
+        return response
 
-    monkeypatch.setattr(manager_module.urllib.request, "urlretrieve", copy_archive)
+    monkeypatch.setattr(manager_module.urllib.request, "urlopen", open_archive)
     try:
         initial = await manager.mutate(lambda: manager.install_archive(archive))
         stale = host.facade("echo-tool")

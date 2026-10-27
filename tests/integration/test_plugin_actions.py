@@ -318,6 +318,13 @@ async def test_plugin_http_disable_and_uninstall_cancel_inflight_actions(env) ->
         ),
     )
     state = await _install_synthetic_host_plugin(server, "echo-tool")
+    # Warm the lazy HTTP route before measuring in-flight action cancellation.
+    ready = await client.post(
+        "/api/plugins/echo-tool/actions/ping",
+        headers=admin_auth,
+        json={"api_version": 1, "payload": {"value": "ready"}},
+    )
+    assert ready.status_code == 200
     request = asyncio.create_task(
         client.post(
             "/api/plugins/echo-tool/actions/wait",

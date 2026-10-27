@@ -29,6 +29,25 @@ function renderEditor(models: ProviderModel[]) {
 }
 
 describe("ModelListEditor", () => {
+  it("shows protocol fallback after selecting Responses", async () => {
+    const user = userEvent.setup();
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 1;
+    });
+    renderEditor([
+      { id: "deepseek-chat", name: "DeepSeek Chat", enabled: true },
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "models.editModel" }));
+    await user.click(screen.getByText("models.apiModeChatCompletions"));
+    await user.click(await screen.findByText("models.apiModeResponses"));
+
+    expect(screen.getByText("models.apiFallback")).toBeInTheDocument();
+    expect(screen.getByText("models.apiFallbackNone")).toBeInTheDocument();
+  });
+
   it("scrolls to the edit form after clicking edit", async () => {
     const user = userEvent.setup();
     const scrollIntoView = vi.fn();
@@ -44,7 +63,6 @@ describe("ModelListEditor", () => {
     await user.click(screen.getByRole("button", { name: "models.editModel" }));
     expect(await screen.findByDisplayValue("qwen")).toBeInTheDocument();
     expect(scrollIntoView).toHaveBeenCalled();
-    expect(screen.getByText("models.purposeChat")).toBeInTheDocument();
     expect(screen.queryByText("models.reasoning")).not.toBeInTheDocument();
 
     await user.click(

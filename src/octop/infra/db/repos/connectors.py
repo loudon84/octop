@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - optional PostgreSQL driver
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, bool_int, map_rows, now_ts
+from octop.infra.users.groups import RESOURCE_CONNECTOR, group_visibility_sql
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,13 @@ class ConnectorRepo:
             ).fetchone()
         return ConnectorRow.from_row(r) if r else None
 
+    def list_all(self) -> list[ConnectorRow]:
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM connectors ORDER BY display_name, instance_id"
+            ).fetchall()
+        return map_rows(rows, ConnectorRow)
+
     def list_by_user(self, user_id: int) -> list[ConnectorRow]:
         with self._db.connect() as conn:
             rows = conn.execute(
@@ -159,14 +167,22 @@ class ConnectorRepo:
         return map_rows(rows, ConnectorRow)
 
     def list_visible(self, user_id: int) -> list[ConnectorRow]:
+        """Owned instances plus shared ones that pass the per-instance group layer."""
         with self._db.connect() as conn:
+            clause = group_visibility_sql(RESOURCE_CONNECTOR, "c.instance_id")
             rows = conn.execute(
-                "SELECT * FROM connectors "
-                "WHERE user_id = ? OR (shared = 1 AND kind != 'composio-connect') "
-                "ORDER BY display_name, instance_id",
-                (user_id,),
+                "SELECT c.* FROM connectors c "
+                "WHERE (c.user_id = ? OR (c.shared = 1 AND c.kind != 'composio-connect')) "
+                f"AND (c.user_id = ? OR {clause}) "
+                "ORDER BY c.display_name, c.instance_id",
+                (user_id, user_id, user_id),
             ).fetchall()
         return map_rows(rows, ConnectorRow)
+
+    def connector_feature_allows(self, user_id: int) -> bool:
+        """Deprecated feature-wide gate. Always True; visibility is per instance."""
+        del user_id
+        return True
 
     def list_by_kind(self, kind: str) -> list[ConnectorRow]:
         with self._db.connect() as conn:

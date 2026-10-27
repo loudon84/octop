@@ -1,4 +1,8 @@
-import { App, Switch, Tag, Tooltip, Typography } from "antd";
+import { App, Tag, Switch, Tooltip, Typography } from "antd";
+import {
+  SharedAvatarMark,
+  SharedResourceBadge,
+} from "../../../components/SharedResourceBadge";
 
 import { Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -81,13 +85,19 @@ export function ConnectorInstanceCard({
     >
       <div className={styles.typeCardBody}>
         <div className={styles.typeCardHeader}>
-          <div className={styles.typeCardIconLarge}>
-            <ConnectorLogo
-              kind={instance.kind}
-              icon={catalogEntry?.icon}
-              size={40}
-            />
-          </div>
+          <SharedAvatarMark
+            shared={instance.shared}
+            owned={isOwner}
+            ownerName={ownerLabel}
+          >
+            <div className={styles.typeCardIconLarge}>
+              <ConnectorLogo
+                kind={instance.kind}
+                icon={catalogEntry?.icon}
+                size={40}
+              />
+            </div>
+          </SharedAvatarMark>
           <div className={styles.typeCardTitleCol}>
             <Typography.Text
               className={styles.typeCardTitle}
@@ -95,16 +105,11 @@ export function ConnectorInstanceCard({
             >
               {instance.display_name}
             </Typography.Text>
-            {instance.shared ? (
-              <Tag color="blue" className={styles.instanceCardTag}>
-                {isOwner || !ownerLabel
-                  ? t("connectors.sharedBadge", "共享")
-                  : t("connectors.sharedFrom", {
-                      name: ownerLabel,
-                      defaultValue: `来自 ${ownerLabel}`,
-                    })}
-              </Tag>
-            ) : null}
+            <SharedResourceBadge
+              shared={instance.shared && isOwner}
+              owned
+              ownerName={ownerLabel}
+            />
             {isComposio ? (
               <>
                 <Tag className={styles.instanceCardTag}>

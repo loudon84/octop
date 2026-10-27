@@ -74,7 +74,7 @@ vi.mock("./CustomMcpTab", () => ({
   CustomMcpTab: () => <div>Custom MCP servers</div>,
 }));
 vi.mock("../../../hooks/useCurrentUser", () => ({
-  useCurrentUser: () => null,
+  useCurrentUser: () => ({ id: 1, role: "admin" }),
 }));
 
 function LocationProbe() {

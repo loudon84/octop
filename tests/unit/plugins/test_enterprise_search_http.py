@@ -278,6 +278,8 @@ async def test_http_send_deadline_covers_a_blocked_mock_response() -> None:
 
     attempt = SearchHttpAttempt(_config(), transport=httpx.MockTransport(handler))
     try:
+        # This deadline exercises send cancellation, independently of TLS setup.
+        await attempt._get_client(time.monotonic() + 10)
         with pytest.raises(SearchHttpError) as caught:
             await attempt.search("private-query-sentinel", deadline_at=time.monotonic() + 0.1)
         assert caught.value.code == "TIMEOUT"
@@ -1098,6 +1100,8 @@ async def test_parser_timeout_keeps_late_future_private_and_close_drains(
 
     monkeypatch.setattr(_search_http, "_parse_response", blocked_parser)
     attempt = SearchHttpAttempt(_config(), transport=httpx.MockTransport(handler))
+    # Start the parser deadline after the separately tested TLS setup has finished.
+    await attempt._get_client(time.monotonic() + 10)
     task = asyncio.create_task(attempt.search("query", deadline_at=time.monotonic() + 0.1))
     close_task: asyncio.Task[None] | None = None
     try:
