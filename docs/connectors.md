@@ -93,3 +93,4 @@ Optional: `quick_auth_url`, `login_url`, `guide_url`, `manual_url`, `auth_hint`,
 
 - [Agent Mail CLI](connectors-agently-mail.md)
 - [Qichacha / 企查查](connectors-qcc.md)
+- [WeKnora 私有知识库](connectors-weknora.md)
