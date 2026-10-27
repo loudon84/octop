@@ -48,6 +48,7 @@ import { ConnectorCard } from "./ConnectorCard";
 import { AgentlyAuth } from "./AgentlyAuth";
 import { ConnectorInstanceCard } from "./ConnectorInstanceCard";
 import { CustomMcpTab } from "./CustomMcpTab";
+import { ComposioTab } from "./ComposioTab";
 import {
   INLINE_CREDENTIAL_GUIDE_KINDS,
   HIDE_INLINE_FIELD_GUIDE_KINDS,
@@ -2254,18 +2255,35 @@ function ConnectorConfigDrawer({
   );
 }
 
-type ConnectorTab = "enabled" | "builtin" | "custom";
+type ConnectorTab = "enabled" | "builtin" | "composio" | "custom";
 
 const CONNECTOR_TABS: TabBarItem<ConnectorTab>[] = [
   { key: "enabled", labelKey: "connectors.tabEnabled", icon: Link2 },
   { key: "builtin", labelKey: "connectors.tabBuiltin", icon: Blocks },
+  { key: "composio", labelKey: "connectors.tabComposio", icon: Sparkles },
   { key: "custom", labelKey: "connectors.tabCustom", icon: Wrench },
 ];
+
+const COMPOSIO_KIND = "composio-connect";
+
+function tabFromSearch(raw: string | null): ConnectorTab | null {
+  if (
+    raw === "enabled" ||
+    raw === "builtin" ||
+    raw === "composio" ||
+    raw === "custom"
+  ) {
+    return raw;
+  }
+  return null;
+}
 
 export default function ConnectorsPage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<ConnectorTab>("enabled");
+  const [activeTab, setActiveTab] = useState<ConnectorTab>(
+    () => tabFromSearch(searchParams.get("tab")) ?? "enabled",
+  );
   const [drawerEntry, setDrawerEntry] = useState<ConnectorCatalogEntry | null>(
     null,
   );
@@ -2275,53 +2293,137 @@ export default function ConnectorsPage() {
     string | null
   >(null);
   const { catalog, instances, loading, refresh } = useConnectorInstances();
+  const claimedOAuthStates = useRef(new Set<string>());
+  const activeOAuthState = useRef<string | null>(null);
+  const oauthCallbackContext = useRef({ catalog, refresh, t });
+  oauthCallbackContext.current = { catalog, refresh, t };
+  const oauthState = searchParams.get("oauth_state");
+
+  const builtinCatalog = useMemo(
+    () => catalog.filter((entry) => entry.kind !== COMPOSIO_KIND),
+    [catalog],
+  );
 
   const configuredCount = useMemo(() => {
-    return instances.filter((instance) => instance.has_credentials).length;
+    return instances.filter(
+      (instance) => instance.has_credentials && instance.kind !== COMPOSIO_KIND,
+    ).length;
   }, [instances]);
 
   useEffect(() => {
-    const oauthState = searchParams.get("oauth_state");
+    const fromUrl = tabFromSearch(searchParams.get("tab"));
+    if (fromUrl && fromUrl !== activeTab) setActiveTab(fromUrl);
+  }, [searchParams, activeTab]);
+
+  const changeTab = useCallback(
+    (key: ConnectorTab) => {
+      if (key === "custom") setCustomFocusServerName(null);
+      setActiveTab(key);
+      const next = new URLSearchParams(searchParams);
+      next.set("tab", key);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  useEffect(() => {
     if (!oauthState) return;
+    if (claimedOAuthStates.current.has(oauthState)) return;
+    claimedOAuthStates.current.add(oauthState);
+    activeOAuthState.current = oauthState;
     void (async () => {
+      let composioCallback = false;
       try {
         const pending = await connectorsApi.oauthPending(oauthState);
+        if (activeOAuthState.current !== oauthState) return;
         const kind = String(pending.kind || "");
-        const entry = catalog.find((c) => c.kind === kind);
-        const tokens = pending.tokens ?? {};
-        if (!entry || !tokens.access_token) {
-          message.error(t("connectors.oauthFailed", "获取授权结果失败"));
-          return;
-        }
-        const credentials: Record<string, unknown> = {
-          access_token: tokens.access_token,
-        };
-        if (tokens.refresh_token)
-          credentials.refresh_token = tokens.refresh_token;
-        if (tokens.expires_at) credentials.expires_at = tokens.expires_at;
-        if (tokens.oauth_client_id)
-          credentials.oauth_client_id = tokens.oauth_client_id;
-        if (tokens.oauth_client_secret)
-          credentials.oauth_client_secret = tokens.oauth_client_secret;
-        if (tokens.openid) credentials.openid = tokens.openid;
+        if (kind === COMPOSIO_KIND) {
+          composioCallback = true;
+          setActiveTab("composio");
+          if (pending.applied) {
+            message.success(
+              oauthCallbackContext.current.t(
+                "connectors.composio.connectSuccess",
+                "已连接我的 Composio",
+              ),
+            );
+            await oauthCallbackContext.current.refresh();
+            notifyConnectorsChanged();
+          } else {
+            message.error(
+              oauthCallbackContext.current.t(
+                "connectors.oauthFailed",
+                "获取授权结果失败",
+              ),
+            );
+          }
+        } else {
+          const entry = oauthCallbackContext.current.catalog.find(
+            (c) => c.kind === kind,
+          );
+          const tokens = pending.tokens ?? {};
+          if (!entry || !tokens.access_token) {
+            if (activeOAuthState.current !== oauthState) return;
+            message.error(
+              oauthCallbackContext.current.t(
+                "connectors.oauthFailed",
+                "获取授权结果失败",
+              ),
+            );
+          } else {
+            const credentials: Record<string, unknown> = {
+              access_token: tokens.access_token,
+            };
+            if (tokens.refresh_token)
+              credentials.refresh_token = tokens.refresh_token;
+            if (tokens.expires_at) credentials.expires_at = tokens.expires_at;
+            if (tokens.oauth_client_id)
+              credentials.oauth_client_id = tokens.oauth_client_id;
+            if (tokens.oauth_client_secret)
+              credentials.oauth_client_secret = tokens.oauth_client_secret;
+            if (tokens.openid) credentials.openid = tokens.openid;
 
-        await connectorsApi.createInstance({
-          kind: entry.kind,
-          display_name: entry.name,
-          description: entry.description,
-          credentials,
-          default_open: false,
-        });
-        await refresh();
-        notifyConnectorsChanged();
-        message.success(t("connectors.createSuccess", "连接器已创建"));
+            await connectorsApi.createInstance({
+              kind: entry.kind,
+              display_name: entry.name,
+              description: entry.description,
+              credentials,
+              default_open: false,
+            });
+            if (activeOAuthState.current !== oauthState) return;
+            await oauthCallbackContext.current.refresh();
+            notifyConnectorsChanged();
+            message.success(
+              oauthCallbackContext.current.t(
+                "connectors.createSuccess",
+                "连接器已创建",
+              ),
+            );
+          }
+        }
       } catch {
-        message.error(t("connectors.oauthFailed", "获取授权结果失败"));
+        if (activeOAuthState.current === oauthState) {
+          message.error(
+            oauthCallbackContext.current.t(
+              "connectors.oauthFailed",
+              "获取授权结果失败",
+            ),
+          );
+        }
+      } finally {
+        setSearchParams(
+          (current) => {
+            if (current.get("oauth_state") !== oauthState) return current;
+            const next = new URLSearchParams(current);
+            next.delete("oauth_state");
+            if (composioCallback) next.set("tab", "composio");
+            return next;
+          },
+          { replace: true },
+        );
       }
-      searchParams.delete("oauth_state");
-      setSearchParams(searchParams, { replace: true });
     })();
-  }, [searchParams, setSearchParams, catalog, refresh, t]);
+  }, [oauthState, setSearchParams]);
 
   const handleConfigure = useCallback(
     (entry: ConnectorCatalogEntry, instance: ConnectorInstance | null) => {
@@ -2349,16 +2451,17 @@ export default function ConnectorsPage() {
         <TabBar
           tabs={CONNECTOR_TABS}
           activeKey={activeTab}
-          onChange={(key) => {
-            if (key === "custom") setCustomFocusServerName(null);
-            setActiveTab(key);
-          }}
+          onChange={(key) => changeTab(key)}
         />
       }
     >
-      <PluginSettingsSurface agentId={null} location="connectors" />
+      <div hidden={activeTab !== "enabled"}>
+        <PluginSettingsSurface agentId={null} location="connectors" />
+      </div>
       {activeTab === "custom" ? (
         <CustomMcpTab focusServerName={customFocusServerName} />
+      ) : activeTab === "composio" ? (
+        <ComposioTab />
       ) : activeTab === "enabled" ? (
         loading ? (
           <div className={styles.loadingState}>
@@ -2389,15 +2492,12 @@ export default function ConnectorsPage() {
               ]}
               primaryAction={{
                 label: t("connectors.emptyGuideBrowseBuiltin"),
-                onClick: () => setActiveTab("builtin"),
+                onClick: () => changeTab("builtin"),
                 icon: <Plug size={14} />,
               }}
               secondaryAction={{
                 label: t("connectors.emptyGuideAddCustom"),
-                onClick: () => {
-                  setCustomFocusServerName(null);
-                  setActiveTab("custom");
-                },
+                onClick: () => changeTab("custom"),
                 icon: <Plus size={14} />,
                 type: "default",
               }}
@@ -2431,7 +2531,11 @@ export default function ConnectorsPage() {
                   onEdit={(item) => {
                     if (item.kind === "custom-mcp") {
                       setCustomFocusServerName(item.mcp_server_name);
-                      setActiveTab("custom");
+                      changeTab("custom");
+                      return;
+                    }
+                    if (item.kind === COMPOSIO_KIND) {
+                      changeTab("composio");
                       return;
                     }
                     const entry = catalog.find((row) => row.kind === item.kind);
@@ -2448,7 +2552,7 @@ export default function ConnectorsPage() {
           <div className={styles.listToolbar}>
             <span className={styles.listToolbarMeta}>
               {t("connectors.listSummary", {
-                total: catalog.length,
+                total: builtinCatalog.length,
                 configured: configuredCount,
                 defaultValue:
                   "当前支持 {{total}} 个连接器，已配置 {{configured}} 个",
@@ -2468,7 +2572,7 @@ export default function ConnectorsPage() {
             </div>
           ) : (
             <div className={styles.typeGrid}>
-              {catalog.map((entry) => (
+              {builtinCatalog.map((entry) => (
                 <ConnectorCard
                   key={entry.kind}
                   entry={entry}

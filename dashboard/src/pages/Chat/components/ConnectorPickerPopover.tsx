@@ -40,6 +40,8 @@ export default function ConnectorPickerPopover({
     [],
   );
 
+  const hasComposio = connectors.some((c) => c.kind === "composio-connect");
+
   return (
     <SearchablePickerPanel
       items={connectors}
@@ -53,6 +55,16 @@ export default function ConnectorPickerPopover({
         onNavigateAway?.();
         navigate("/connectors");
       }}
+      beforeFooter={
+        hasComposio ? (
+          <div
+            className={pickerStyles.itemDesc}
+            style={{ padding: "8px 12px" }}
+          >
+            {t("connectors.chatComposioScopeHint")}
+          </div>
+        ) : null
+      }
       renderItem={(connector) => {
         const active = selectedConnectors.includes(connector.mcp_server_name);
         return (
@@ -67,6 +79,11 @@ export default function ConnectorPickerPopover({
             </span>
             <span className={pickerStyles.itemText}>
               <span className={pickerStyles.itemName}>{connector.label}</span>
+              {connector.kind === "composio-connect" ? (
+                <span className={pickerStyles.itemDesc}>
+                  {t("connectors.composio.source", "来源：Composio")}
+                </span>
+              ) : null}
               {connector.default_open ? (
                 <span className={pickerStyles.itemDesc}>
                   {t("connectors.defaultOpenLockedBadge", "默认打开")}

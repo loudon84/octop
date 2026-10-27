@@ -344,7 +344,9 @@
       "callback_invalid_state": "无效或过期的 state。",
       "callback_token_exchange_failed": "Token 交换失败：{detail}",
       "callback_save_failed": "保存授权失败：{detail}",
-      "callback_success": "授权完成，可关闭此窗口。"
+      "callback_success": "授权完成，可关闭此窗口。",
+      "authorization_denied": "授权未完成。",
+      "safe_upstream_error": "Composio 未能完成授权请求。"
     },
     "agently": {
       "login_failed": "授权失败，请重新发起授权。",
@@ -448,6 +450,9 @@
     "CONNECTOR_NOT_BOUND": "连接器未绑定到此 Agent。",
     "CONNECTOR_ALREADY_BOUND": "连接器已绑定。",
     "CONNECTOR_MCP_LOAD_FAILED": "无法加载 MCP 工具：{servers}",
+    "COMPOSIO_SHARE_FORBIDDEN": "个人 Composio 连接不可共享。",
+    "COMPOSIO_DEFAULT_OPEN_FORBIDDEN": "Composio 不能默认随每次对话自动开启。",
+    "COMPOSIO_UPSTREAM_UNAVAILABLE": "Composio 云服务暂时不可用，请重试或重新连接。",
     "BRIDGE_NOT_FOUND": "未找到云端协同连接。",
     "BRIDGE_AUTH_FAILED": "对端 Octop 拒绝了登录凭证。请核对地址、用户名和密码；也可先点「探测」验证账号是否可用。",
     "BRIDGE_PEER_UNREACHABLE": "无法连接对端 Octop 实例。请确认：地址可访问、账号密码正确，且对端已升级到支持云端协同的版本（需开放 /api/bridge/ws）。若对端在内网，需由可达的一侧主动发起连接。",

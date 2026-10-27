@@ -160,7 +160,7 @@ async def put_tool_guard_rules_raw(
     count, errors = store.save_text(body.content)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
-    registry.reload_octop_harnesss()
+    await registry.areload_octop_harnesss()
     server.services.audit_repo.write(
         actor=ACTOR_ADMIN,
         action="security.tool_guard_rules.update",
@@ -178,7 +178,7 @@ async def post_tool_guard_rules_reset(
     store = _rules_store(server)
     registry = server.app_runtime.agent_registry
     content = store.reset_to_bundled()
-    registry.reload_octop_harnesss()
+    await registry.areload_octop_harnesss()
     server.services.audit_repo.write(
         actor=ACTOR_ADMIN,
         action="security.tool_guard_rules.reset",

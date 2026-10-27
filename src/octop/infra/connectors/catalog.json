@@ -425,6 +425,32 @@
       }
     },
     {
+      "kind": "composio-connect",
+      "name": { "en": "Composio", "zh": "Composio 云应用" },
+      "description": {
+        "en": "Connect your personal Composio account to use external apps via Composio cloud meta-tools",
+        "zh": "连接你的个人 Composio 账户，通过 Composio 云服务元工具使用外部应用"
+      },
+      "auth_kind": "oauth2",
+      "doc_url": "https://docs.composio.dev/docs/composio-connect",
+      "icon": "composio",
+      "color": "#6E56CF",
+      "phase": "available",
+      "mcp_mode": "remote",
+      "category": "productivity",
+      "guide_url": "https://docs.composio.dev/docs/composio-connect",
+      "auth_hint": {
+        "en": "Connect your personal Composio account. Tool requests go through Composio cloud; app authorization happens on Composio or the app.",
+        "zh": "连接你的个人 Composio 账户。工具请求经 Composio 云服务；应用授权在 Composio 或对应应用页面完成。"
+      },
+      "oauth_issuer": "https://connect.composio.dev",
+      "mcp_url": "https://connect.composio.dev/mcp",
+      "oauth_resource": "https://connect.composio.dev/mcp",
+      "oauth_scopes": "openid profile email offline_access",
+      "remote_transport": "streamable_http",
+      "mcp_user_agent": "octop-connector/0.1"
+    },
+    {
       "kind": "notion",
       "name": { "en": "Notion", "zh": "Notion" },
       "description": {

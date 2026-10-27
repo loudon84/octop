@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 from dataclasses import dataclass
+
+try:
+    from psycopg import errors as pg_errors
+except ImportError:  # pragma: no cover - optional PostgreSQL driver
+    pg_errors = None  # type: ignore[assignment]
 
 from octop.infra.db.pool import DatabasePool
 from octop.infra.db.repos._base import DbRow, bool_int, map_rows, now_ts
@@ -92,24 +99,40 @@ class ConnectorRepo:
         shared: bool = False,
     ) -> str:
         ts = now_ts()
-        with self._db.transaction() as conn:
-            conn.execute(
-                "INSERT INTO connectors("
-                "instance_id, user_id, kind, display_name, status, shared, mcp_server_name, "
-                "config_json, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-                (
-                    instance_id,
-                    user_id,
-                    kind,
-                    display_name,
-                    bool_int(shared),
-                    mcp_server_name,
-                    config_json,
-                    ts,
-                    ts,
-                ),
+        try:
+            with self._db.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO connectors("
+                    "instance_id, user_id, kind, display_name, status, shared, mcp_server_name, "
+                    "config_json, created_at, updated_at"
+                    ") VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+                    (
+                        instance_id,
+                        user_id,
+                        kind,
+                        display_name,
+                        bool_int(shared),
+                        mcp_server_name,
+                        config_json,
+                        ts,
+                        ts,
+                    ),
+                )
+        except Exception as exc:
+            is_composio_singleton_conflict = kind == "composio-connect" and (
+                isinstance(exc, sqlite3.IntegrityError)
+                and "unique constraint failed: connectors.user_id" in str(exc).lower()
+                or pg_errors is not None
+                and isinstance(exc, pg_errors.UniqueViolation)
+                and getattr(getattr(exc, "diag", None), "constraint_name", None)
+                == "idx_connectors_composio_user"
             )
+            if not is_composio_singleton_conflict:
+                raise
+            winner = self.get_by_user_kind(user_id, kind)
+            if winner is None:
+                raise
+            return winner.instance_id
         return instance_id
 
     def get(self, instance_id: str) -> ConnectorRow | None:
@@ -139,7 +162,7 @@ class ConnectorRepo:
         with self._db.connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM connectors "
-                "WHERE user_id = ? OR shared = 1 "
+                "WHERE user_id = ? OR (shared = 1 AND kind != 'composio-connect') "
                 "ORDER BY display_name, instance_id",
                 (user_id,),
             ).fetchall()
@@ -264,7 +287,15 @@ class ConnectorRepo:
                 (state_id, state, user_id, kind, code_verifier, redirect_after, now_ts()),
             )
 
-    def consume_oauth_state(self, state: str) -> ConnectorOAuthStateRow | None:
+    def consume_oauth_state(
+        self,
+        state: str,
+        *,
+        max_age_sec: int = 600,
+        now: int | None = None,
+    ) -> ConnectorOAuthStateRow | None:
+        """Consume a one-time OAuth state; expired rows are deleted and ignored."""
+        ts = int(time.time()) if now is None else int(now)
         with self._db.transaction() as conn:
             r = conn.execute(
                 "SELECT * FROM connector_oauth_states WHERE state = ?", (state,)
@@ -272,7 +303,46 @@ class ConnectorRepo:
             if not r:
                 return None
             conn.execute("DELETE FROM connector_oauth_states WHERE state = ?", (state,))
+            created = int(r["created_at"] or 0)
+            if created <= 0 or created > ts or (max_age_sec > 0 and (ts - created) > max_age_sec):
+                return None
         return ConnectorOAuthStateRow.from_row(r)
+
+    def get_oauth_state_by_id(self, state_id: str) -> ConnectorOAuthStateRow | None:
+        with self._db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM connector_oauth_states WHERE state_id = ?", (state_id,)
+            ).fetchone()
+        return ConnectorOAuthStateRow.from_row(row) if row else None
+
+    def get_oauth_state_by_state(self, state: str) -> ConnectorOAuthStateRow | None:
+        with self._db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM connector_oauth_states WHERE state = ?", (state,)
+            ).fetchone()
+        return ConnectorOAuthStateRow.from_row(row) if row else None
+
+    def cancel_oauth_state(
+        self,
+        *,
+        state_id: str,
+        user_id: int,
+        kind: str,
+    ) -> ConnectorOAuthStateRow | None:
+        """Atomically remove a pending state owned by this user and connector kind."""
+        with self._db.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM connector_oauth_states "
+                "WHERE state_id = ? AND user_id = ? AND kind = ?",
+                (state_id, user_id, kind),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "DELETE FROM connector_oauth_states WHERE state_id = ?",
+                (state_id,),
+            )
+        return ConnectorOAuthStateRow.from_row(row)
 
     def prune_old_oauth_states(self, older_than_ts: int) -> None:
         with self._db.transaction() as conn:

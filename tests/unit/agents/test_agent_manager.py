@@ -2537,8 +2537,8 @@ async def test_reload_agent_does_not_block_event_loop(
     await ticker_task
 
 
-def test_build_mcp_configs_registers_gateway_without_transport(manager: AgentManager) -> None:
-    """Gateway connectors register a name-only placeholder; tools inject in-process."""
+def test_harness_base_config_excludes_user_gateway_connectors(manager: AgentManager) -> None:
+    """User connectors are mounted only within an explicitly selected turn."""
     from octop.infra.connectors.builder import mcp_server_name
     from octop.infra.connectors.crypto import encrypt_credentials
     from octop.infra.utils.ulid import new_ulid
@@ -2566,12 +2566,11 @@ def test_build_mcp_configs_registers_gateway_without_transport(manager: AgentMan
     manager._repos.connector_repo.upsert_credentials(instance_id=iid, blob=creds, expires_at=None)
 
     configs = manager._build_harness_config(manager.get_row(agent_id) or _row()).mcp_server_configs
-    assert mcp_name in configs
-    assert configs[mcp_name] == {}
+    assert configs == {}
 
 
-def test_build_mcp_configs_shared_agent_uses_connector_user_override(manager: AgentManager) -> None:
-    """Shared agents (user_id=NULL) need connector_user_override to resolve connectors."""
+def test_harness_base_config_excludes_shared_callers_connectors(manager: AgentManager) -> None:
+    """Shared user connectors never enter the process-wide agent graph baseline."""
     from octop.infra.connectors.builder import mcp_server_name
     from octop.infra.connectors.crypto import encrypt_credentials
     from octop.infra.utils.ulid import new_ulid
@@ -2602,14 +2601,172 @@ def test_build_mcp_configs_shared_agent_uses_connector_user_override(manager: Ag
     )
     manager._repos.connector_repo.upsert_credentials(instance_id=iid, blob=creds, expires_at=None)
 
-    manager._connector_user_override[agent_id] = uid
+    from octop.infra.agents.manager import _connector_user_id_var
+
+    token = _connector_user_id_var.set(uid)
     try:
         configs = manager._build_harness_config(
             manager.get_row(agent_id) or _row()
         ).mcp_server_configs
     finally:
-        manager._connector_user_override.pop(agent_id, None)
-    assert mcp_name in configs
+        _connector_user_id_var.reset(token)
+    assert configs == {}
+
+
+def test_mcp_execution_lock_initializes_lazily_for_lightweight_manager() -> None:
+    manager = object.__new__(AgentManager)
+
+    state = manager._mcp_execution_state("agent")
+
+    assert manager._mcp_execution_locks == {"agent": state}
+
+
+def test_sync_security_rebuild_accepts_lightweight_manager_without_lock_state() -> None:
+    manager = object.__new__(AgentManager)
+    manager._harness_manager = SimpleNamespace()
+    manager._reload_octop_harnesss_unlocked = MagicMock()
+
+    manager.reload_octop_harnesss()
+
+    manager._reload_octop_harnesss_unlocked.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_security_rebuild_waits_for_active_agent_execution_lease(
+    manager: AgentManager,
+) -> None:
+    entry = SimpleNamespace(agent_id="shared-agent")
+    harness = MagicMock()
+    harness.list_agents.return_value = [entry]
+    manager._harness_manager = harness
+    state = manager._mcp_execution_state(entry.agent_id)
+    rebuild_started = asyncio.Event()
+    manager._reload_octop_harnesss_unlocked = MagicMock(side_effect=rebuild_started.set)
+
+    exclusive = state.exclusive()
+    await exclusive.__aenter__()
+    with pytest.raises(RuntimeError, match="active agent turns"):
+        manager.reload_octop_harnesss()
+    task = asyncio.create_task(manager.areload_octop_harnesss())
+    await asyncio.sleep(0)
+    assert not rebuild_started.is_set()
+    await exclusive.__aexit__(None, None, None)
+    await asyncio.wait_for(task, timeout=1)
+    assert rebuild_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_mcp_execution_lease_allows_concurrent_readers() -> None:
+    from octop.infra.agents.manager import _AgentMcpExecutionLease
+
+    lease = _AgentMcpExecutionLease()
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def reader(entered: asyncio.Event) -> None:
+        async with lease.shared():
+            entered.set()
+            await release.wait()
+
+    first = asyncio.create_task(reader(first_entered))
+    await first_entered.wait()
+    second = asyncio.create_task(reader(second_entered))
+    await asyncio.wait_for(second_entered.wait(), timeout=1)
+    assert lease._readers == 2
+    release.set()
+    await asyncio.gather(first, second)
+    assert lease._readers == 0
+
+
+@pytest.mark.asyncio
+async def test_mcp_execution_lease_waiting_writer_blocks_new_readers() -> None:
+    from octop.infra.agents.manager import _AgentMcpExecutionLease
+
+    lease = _AgentMcpExecutionLease()
+    reader_entered = asyncio.Event()
+    release_reader = asyncio.Event()
+    writer_entered = asyncio.Event()
+    release_writer = asyncio.Event()
+    order: list[str] = []
+
+    async def first_reader() -> None:
+        async with lease.shared():
+            reader_entered.set()
+            await release_reader.wait()
+
+    async def writer() -> None:
+        async with lease.exclusive():
+            order.append("writer")
+            writer_entered.set()
+            await release_writer.wait()
+
+    async def later_reader() -> None:
+        async with lease.shared():
+            order.append("reader")
+
+    reader_task = asyncio.create_task(first_reader())
+    await reader_entered.wait()
+    writer_task = asyncio.create_task(writer())
+    while lease._waiting_writers == 0:
+        await asyncio.sleep(0)
+    later_reader_task = asyncio.create_task(later_reader())
+    await asyncio.sleep(0)
+    assert order == []
+
+    release_reader.set()
+    await asyncio.wait_for(writer_entered.wait(), timeout=1)
+    assert order == ["writer"]
+    release_writer.set()
+    await asyncio.gather(reader_task, writer_task, later_reader_task)
+    assert order == ["writer", "reader"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_execution_lease_releases_queued_and_held_cancellations() -> None:
+    from octop.infra.agents.manager import _AgentMcpExecutionLease
+
+    lease = _AgentMcpExecutionLease()
+    reader_entered = asyncio.Event()
+    release_reader = asyncio.Event()
+
+    async def reader() -> None:
+        async with lease.shared():
+            reader_entered.set()
+            await release_reader.wait()
+
+    async def queued_writer() -> None:
+        async with lease.exclusive():
+            pytest.fail("cancelled queued writer must not enter")
+
+    reader_task = asyncio.create_task(reader())
+    await reader_entered.wait()
+    queued_task = asyncio.create_task(queued_writer())
+    while lease._waiting_writers == 0:
+        await asyncio.sleep(0)
+    queued_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued_task
+    assert lease._waiting_writers == 0
+
+    held_entered = asyncio.Event()
+
+    async def held_writer() -> None:
+        async with lease.exclusive():
+            held_entered.set()
+            await asyncio.Future()
+
+    held_task = asyncio.create_task(held_writer())
+    release_reader.set()
+    await asyncio.wait_for(held_entered.wait(), timeout=1)
+    held_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await held_task
+    await asyncio.gather(reader_task)
+    assert not lease._writer
+    assert lease._readers == 0
+    async with lease.shared():
+        assert lease._readers == 1
 
 
 def test_mcp_tool_filter_uses_server_prefix(manager: AgentManager) -> None:
@@ -2640,6 +2797,23 @@ def test_prepare_stream_request_maps_max_iters_to_recursion_limit(
     )
     req = manager._prepare_stream_request(agent_id, {"messages": "hi"})
     assert req["recursion_limit"] == 17
+
+
+def test_prepare_stream_request_strips_connector_runtime_context(
+    manager: AgentManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager, "get_config", lambda _agent_id: {})
+    req = manager._prepare_stream_request(
+        "01AGENT",
+        {
+            "messages": "hi",
+            "connector_user_id": 7,
+            "mcp_servers": ["docs__1"],
+            "_resume_mcp_context": True,
+        },
+    )
+    assert req == {"messages": "hi", "agent_id": "01AGENT"}
 
 
 def test_prepare_stream_request_maps_model_settings_and_max_input_tokens(

@@ -1394,6 +1394,28 @@ def _ensure_connectors_v13_schema(db: DatabasePool) -> None:
             conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _ensure_composio_connection_uniqueness(db: DatabasePool) -> None:
+    """Keep Composio connections one-per-user, including databases already at v22."""
+    if not _table_exists(db, "connectors"):
+        return
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_connectors_composio_user "
+                "ON connectors(user_id) WHERE kind = 'composio-connect'"
+            )
+    except Exception as exc:
+        message = str(exc).lower()
+        constraint = getattr(getattr(exc, "diag", None), "constraint_name", None)
+        if "connectors.user_id" in message or constraint == "idx_connectors_composio_user":
+            raise RuntimeError(
+                "Cannot enforce one Composio connection per user: duplicate "
+                "composio-connect rows exist. Reconcile those rows manually, preserving "
+                "the desired credentials, then restart Octop."
+            ) from exc
+        raise
+
+
 _USER_POLICY_IDENTITY_COLUMNS = {
     "id",
     "policy_id",
@@ -2099,6 +2121,7 @@ def run_migrations(db: DatabasePool) -> None:
     _ensure_cron_jobs_schema(db)
     _ensure_trajectory_events_schema(db)
     _ensure_connectors_v13_schema(db)
+    _ensure_composio_connection_uniqueness(db)
     _ensure_user_policy_schema(db)
     _ensure_agent_teams_schema(db)
     _ensure_thread_conversation_mode_schema(db)

@@ -28,6 +28,16 @@ from octop.infra.connectors.catalog import (
     get_catalog_entry,
     list_catalog,
 )
+from octop.infra.connectors.composio import (
+    COMPOSIO_KIND,
+    ComposioService,
+    can_admin_force_disconnect,
+    can_mutate_composio,
+    can_view_composio,
+    is_composio_kind,
+    reject_composio_default_open,
+    reject_composio_share,
+)
 from octop.infra.connectors.custom_mcp import (
     CUSTOM_MCP_KIND,
     is_custom_mcp_kind,
@@ -120,6 +130,76 @@ class OAuthStartBody(BaseModel):
 
 class OAuthStartLegacyBody(BaseModel):
     redirect_after: str | None = None
+
+
+class OAuthCancelBody(BaseModel):
+    state_id: str = Field(..., min_length=1, description="Pending OAuth transaction to cancel")
+
+
+class OAuthCancelResponse(BaseModel):
+    cancelled: bool = Field(
+        description="Whether the current user's pending transaction was cancelled"
+    )
+
+
+class ComposioCapabilities(BaseModel):
+    full_catalog: bool
+    list_connected_apps: bool
+    account_identity: bool
+    check_app_auth: bool
+    search_apps: bool
+
+
+class ComposioConnection(BaseModel):
+    instance_id: str
+    kind: Literal["composio-connect"]
+    display_name: str
+    account_email: str | None
+    source: str
+    mcp_server_name: str
+    status: str
+    auth_status: str
+    health: str
+    usage: str
+    credential_gen: int
+    last_checked_at: int | None
+    capabilities: ComposioCapabilities
+    default_open: Literal[False] = Field(
+        default=False, description="Composio connections are never enabled by default."
+    )
+    shared: Literal[False] = Field(default=False, description="Composio connections are private.")
+    owner_user_id: int
+    created_at: int
+    updated_at: int
+
+
+class ComposioGetResponse(BaseModel):
+    connected: bool
+    connection: ComposioConnection | None
+
+
+class ComposioConnectionResponse(BaseModel):
+    connection: ComposioConnection
+
+
+class ComposioAppSearchResponse(BaseModel):
+    query: str
+    apps: list[dict[str, Any]]
+    source: str
+    partial: bool
+
+
+class ComposioAppAuthResponse(BaseModel):
+    toolkit: str
+    result: dict[str, str]
+    source: str
+
+
+class ComposioAppStatusResponse(BaseModel):
+    toolkit: str | None
+    result: dict[str, Any] | None
+    source: str
+    status: str
 
 
 class ExchangeAuthCodeBody(BaseModel):
@@ -230,6 +310,15 @@ async def _begin_oauth_flow(
 
     state = secrets.token_urlsafe(24)
     state_id = new_ulid()
+    oauth_kind = oauth_state_kind_for_target(target)
+    composio_generation = None
+    if is_composio_kind(oauth_kind):
+        # Mark at request entry, before the OAuth discovery/network awaits, so
+        # concurrent authorizations cannot let a slower older request win.
+        composio_generation = state_id
+        server.services.settings_repo.set(
+            _composio_oauth_generation_key(int(user.id)), composio_generation
+        )
     base = resolve_public_base(request)
     redirect_uri = f"{base}/api/connectors/oauth/callback"
     if oauth_target_requires_https(target) and _is_public_http_uri(redirect_uri):
@@ -258,19 +347,42 @@ async def _begin_oauth_flow(
             mcp_url=mcp_url,
         )
     except ValueError as exc:
+        if composio_generation is not None:
+            logger.warning("Composio OAuth discovery failed (%s)", type(exc).__name__)
+            raise OctopError(
+                ErrorCode.COMPOSIO_UPSTREAM_UNAVAILABLE,
+                "Composio OAuth could not start",
+            ) from exc
         raise OctopError(ErrorCode.CONNECTOR_INVALID_CREDENTIALS, str(exc)) from exc
     except Exception as exc:
+        if composio_generation is not None:
+            logger.warning("Composio OAuth discovery failed (%s)", type(exc).__name__)
+            raise OctopError(
+                ErrorCode.COMPOSIO_UPSTREAM_UNAVAILABLE,
+                "Composio OAuth could not start",
+            ) from exc
         logger.exception("oauth start failed for target %s", target)
         raise OctopError(ErrorCode.CONNECTOR_INVALID_CREDENTIALS, str(exc)) from exc
 
+    if (
+        composio_generation is not None
+        and _composio_oauth_generation(server.services.settings_repo, int(user.id))
+        != composio_generation
+    ):
+        raise OctopError(
+            ErrorCode.CONNECTOR_INVALID_CREDENTIALS,
+            "a newer Composio authorization has replaced this request",
+        )
     server.services.repos.connector_repo.create_oauth_state(
         state_id=state_id,
         state=state,
         user_id=user.id,
-        kind=oauth_state_kind_for_target(target),
+        kind=oauth_kind,
         code_verifier=verifier,
         redirect_after=redirect_after,
     )
+    if composio_generation is not None:
+        ctx["composio_generation"] = composio_generation
     save_oauth_ctx(server.services.settings_repo, state_id, ctx)
     return {"authorize_url": authorize_url, "state_id": state_id}
 
@@ -284,18 +396,25 @@ def _connector_service(server: Any) -> ConnectorService:
     )
 
 
+def _composio_service(server: Any) -> ComposioService:
+    return ComposioService(
+        repo=server.services.repos.connector_repo,
+        connector_svc=_connector_service(server),
+    )
+
+
 def _instance_to_dict(inst: Any) -> dict[str, Any]:
     config = ConnectorRepo.parse_config_json(inst) if hasattr(inst, "config_json") else {}
     return {
         "instance_id": inst.instance_id,
         "kind": inst.kind,
         "display_name": inst.display_name,
-        "description": config.get("description"),
+        "description": None if is_composio_kind(inst.kind) else config.get("description"),
         "status": inst.status,
         "mcp_server_name": inst.mcp_server_name,
         "has_credentials": inst.has_credentials,
-        "default_open": read_default_open(config),
-        "shared": bool(inst.shared),
+        "default_open": False if is_composio_kind(inst.kind) else read_default_open(config),
+        "shared": False if is_composio_kind(inst.kind) else bool(inst.shared),
         "owner_user_id": inst.user_id,
         "created_at": inst.created_at,
         "updated_at": inst.updated_at,
@@ -475,12 +594,30 @@ def _schedule_connector_reload(
     asyncio.create_task(_run())
 
 
+def _invalidate_connector_tool_cache(server: Any, user_id: int) -> None:
+    registry = getattr(getattr(server, "app_runtime", None), "agent_registry", None)
+    invalidate = getattr(registry, "invalidate_mcp_tool_cache", None)
+    if callable(invalidate):
+        invalidate(user_id)
+
+
 def _can_manage_connector(inst: Any, user: Any) -> bool:
+    if is_composio_kind(getattr(inst, "kind", "")):
+        return can_mutate_composio(owner_user_id=int(inst.user_id), actor_id=int(user.id))
     return bool(inst.user_id == user.id or user.role == "admin")
 
 
 def _assert_can_manage_connector(inst: Any, user: Any) -> None:
     if not _can_manage_connector(inst, user):
+        raise OctopError(ErrorCode.FORBIDDEN, "not your connector instance")
+
+
+def _assert_can_view_connector(inst: Any, user: Any) -> None:
+    if not can_view_composio(
+        actor_role=str(user.role),
+        owner_user_id=int(inst.user_id),
+        actor_id=int(user.id),
+    ):
         raise OctopError(ErrorCode.FORBIDDEN, "not your connector instance")
 
 
@@ -521,6 +658,31 @@ def _is_public_http_uri(uri: str) -> bool:
     parsed = urlparse(uri)
     host = (parsed.hostname or "").lower()
     return parsed.scheme == "http" and host not in {"localhost", "127.0.0.1", "::1"}
+
+
+_COMPOSIO_OAUTH_LATEST_PREFIX = "connector.composio.oauth.latest."
+
+
+def _composio_oauth_generation_key(user_id: int) -> str:
+    return f"{_COMPOSIO_OAUTH_LATEST_PREFIX}{user_id}"
+
+
+def _composio_oauth_generation(settings_repo: Any, user_id: int) -> str | None:
+    value = settings_repo.get(_composio_oauth_generation_key(user_id))
+    return value if isinstance(value, str) else None
+
+
+def _invalidate_composio_oauth_generation(
+    settings_repo: Any,
+    user_id: int,
+    *,
+    expected: str | None = None,
+) -> None:
+    key = _composio_oauth_generation_key(user_id)
+    current = settings_repo.get(key)
+    if expected is not None and current != expected:
+        return
+    settings_repo.set(key, new_ulid())
 
 
 @router.get("/connectors/catalog", summary="Connector catalog")
@@ -686,7 +848,10 @@ async def get_instance(
     inst = repo.get(instance_id)
     if inst is None:
         raise OctopError(ErrorCode.CONNECTOR_NOT_FOUND, f"instance {instance_id!r} not found")
-    _assert_can_manage_connector(inst, user)
+    if is_composio_kind(inst.kind):
+        _assert_can_view_connector(inst, user)
+    else:
+        _assert_can_manage_connector(inst, user)
 
     data = _instance_to_dict(inst)
     config: dict[str, Any] = {}
@@ -698,7 +863,41 @@ async def get_instance(
         except json.JSONDecodeError:
             config = {}
     data["config"] = config
-    if inst.has_credentials:
+    if is_composio_kind(inst.kind):
+        # Composio's generic detail view only returns safe status metadata.
+        raw_config = config
+        config = {}
+        config_value = raw_config.get("auth_status")
+        if isinstance(config_value, str) and config_value in {
+            "authenticated",
+            "disconnected",
+            "reauth_required",
+        }:
+            config["auth_status"] = config_value
+        health = raw_config.get("mcp_health")
+        if isinstance(health, str) and health in {"reachable", "unavailable", "unknown"}:
+            config["mcp_health"] = health
+        caps = raw_config.get("capabilities")
+        if isinstance(caps, dict):
+            config["capabilities"] = {
+                key: caps[key] is True
+                for key in (
+                    "full_catalog",
+                    "list_connected_apps",
+                    "account_identity",
+                    "check_app_auth",
+                    "search_apps",
+                )
+            }
+        checked_at = raw_config.get("last_checked_at")
+        if isinstance(checked_at, int):
+            config["last_checked_at"] = checked_at
+        data["config"] = config
+        data["credentials_preview"] = {
+            "oauth_configured": bool(inst.has_credentials),
+            "account_email": None,
+        }
+    elif inst.has_credentials:
         svc = _connector_service(server)
         creds = svc.decrypt(instance_id)
         data["credentials_preview"] = _credentials_preview(inst.kind, creds)
@@ -728,6 +927,8 @@ async def create_instance(
         raise OctopError(ErrorCode.CONNECTOR_KIND_UNSUPPORTED, f"unknown kind {body.kind!r}")
     if entry.phase != "available":
         raise OctopError(ErrorCode.CONNECTOR_KIND_UNSUPPORTED, f"{body.kind} not available")
+    reject_composio_share(kind=body.kind, shared=body.shared)
+    reject_composio_default_open(kind=body.kind, default_open=body.default_open)
 
     repo = server.services.repos.connector_repo
     svc = _connector_service(server)
@@ -744,6 +945,12 @@ async def create_instance(
     if repo.name_exists(user.id, display_name) or _custom_name_exists(svc, user.id, display_name):
         _raise_name_taken(display_name)
     cred_input = dict(body.credentials)
+
+    if is_composio_kind(body.kind):
+        raise OctopError(
+            ErrorCode.CONNECTOR_INVALID_CREDENTIALS,
+            "Composio credentials can only be acquired through OAuth",
+        )
 
     try:
         cred_payload = await _prepare_credentials(
@@ -840,11 +1047,18 @@ async def patch_instance(
     if inst is None:
         raise OctopError(ErrorCode.CONNECTOR_NOT_FOUND, f"instance {instance_id!r} not found")
     _assert_can_manage_connector(inst, user)
+    if is_composio_kind(inst.kind):
+        raise OctopError(
+            ErrorCode.CONNECTOR_INVALID_CREDENTIALS,
+            "use the personal Composio endpoints to manage this connection",
+        )
     if is_custom_mcp_kind(inst.kind):
         raise OctopError(
             ErrorCode.CONNECTOR_KIND_UNSUPPORTED,
             "use PATCH /connectors/custom-mcp/servers/{name} for custom MCP servers",
         )
+    reject_composio_share(kind=inst.kind, shared=body.shared)
+    reject_composio_default_open(kind=inst.kind, default_open=body.default_open)
     if (
         body.status is None
         and body.default_open is None
@@ -950,7 +1164,17 @@ async def delete_instance(
     inst = repo.get(instance_id)
     if inst is None:
         raise OctopError(ErrorCode.CONNECTOR_NOT_FOUND, f"instance {instance_id!r} not found")
-    _assert_can_manage_connector(inst, user)
+    if is_composio_kind(inst.kind):
+        if not can_admin_force_disconnect(
+            actor_role=str(user.role),
+            owner_user_id=int(inst.user_id),
+            actor_id=int(user.id),
+        ):
+            raise OctopError(ErrorCode.FORBIDDEN, "not your connector instance")
+        _invalidate_composio_oauth_generation(server.services.settings_repo, int(inst.user_id))
+        _invalidate_connector_tool_cache(server, int(inst.user_id))
+    else:
+        _assert_can_manage_connector(inst, user)
     user_id = inst.user_id
     cli_creds: dict[str, Any] | None = None
     if (
@@ -986,7 +1210,7 @@ async def delete_instance(
     _schedule_connector_reload(
         server,
         user_id,
-        all_users=inst.shared,
+        all_users=inst.shared and not is_composio_kind(inst.kind),
         mail_instance_id=instance_id if inst.kind == "agently-cli" else None,
     )
     server.services.audit_repo.write(
@@ -994,6 +1218,36 @@ async def delete_instance(
         action="connector.instance.delete",
         target=instance_id,
     )
+
+
+@router.post(
+    "/connectors/oauth/cancel",
+    response_model=OAuthCancelResponse,
+    summary="Cancel a pending personal Composio authorization",
+    description="Cancels the current user's pending Composio OAuth transaction.",
+)
+async def oauth_cancel(
+    body: OAuthCancelBody,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, bool]:
+    repo = server.services.repos.connector_repo
+    latest = _composio_oauth_generation(server.services.settings_repo, int(user.id))
+    if latest != body.state_id:
+        raise OctopError(ErrorCode.NOT_FOUND, "pending Composio authorization not found")
+    row = repo.cancel_oauth_state(
+        state_id=body.state_id,
+        user_id=int(user.id),
+        kind=COMPOSIO_KIND,
+    )
+    if row is None and latest != body.state_id:
+        raise OctopError(ErrorCode.NOT_FOUND, "pending Composio authorization not found")
+    _invalidate_composio_oauth_generation(
+        server.services.settings_repo, int(user.id), expected=body.state_id
+    )
+    delete_oauth_ctx(server.services.settings_repo, body.state_id)
+    server.services.settings_repo.delete(f"connector.oauth.pending.{body.state_id}")
+    return {"cancelled": True}
 
 
 @router.post("/connector-instances/{instance_id}/test", summary="Test connector")
@@ -1019,6 +1273,11 @@ async def test_instance(
     if inst is None:
         raise OctopError(ErrorCode.CONNECTOR_NOT_FOUND, f"instance {instance_id!r} not found")
     _assert_can_manage_connector(inst, user)
+    if is_composio_kind(inst.kind):
+        raise OctopError(
+            ErrorCode.CONNECTOR_INVALID_CREDENTIALS,
+            "use POST /connectors/composio/check to check this connection",
+        )
 
     entry = get_catalog_entry(inst.kind)
     if entry is None:
@@ -1335,6 +1594,11 @@ async def refresh_instance(
         raise OctopError(ErrorCode.CONNECTOR_NOT_FOUND, f"instance {instance_id!r} not found")
     if inst.user_id != user.id:
         raise OctopError(ErrorCode.FORBIDDEN, "not your connector instance")
+    if is_composio_kind(inst.kind):
+        raise OctopError(
+            ErrorCode.CONNECTOR_INVALID_CREDENTIALS,
+            "use POST /connectors/composio/check to check this connection",
+        )
     svc = _connector_service(server)
     creds = await svc.ensure_fresh_credentials(instance_id, inst.kind)
     return {"ok": True, "expires_at": creds.get("expires_at")}
@@ -1448,7 +1712,24 @@ async def oauth_callback(
     server: Any = Depends(get_server),
 ) -> HTMLResponse:
     """OAuth redirect target. Exchanges the code and stores credentials. No JWT required."""
+    repo = server.services.repos.connector_repo
     if error:
+        pending = repo.get_oauth_state_by_state(state) if state else None
+        if pending is not None and is_composio_kind(pending.kind):
+            repo.consume_oauth_state(state or "")
+            ctx = load_oauth_ctx(server.services.settings_repo, pending.state_id)
+            delete_oauth_ctx(server.services.settings_repo, pending.state_id)
+            _invalidate_composio_oauth_generation(
+                server.services.settings_repo,
+                int(pending.user_id),
+                expected=str(ctx.get("composio_generation") or ""),
+            )
+            return _oauth_callback_html(
+                request,
+                "callback_auth_failed",
+                status_code=400,
+                error=tr("connector.oauth.authorization_denied", resolve_request_locale(request)),
+            )
         return _oauth_callback_html(
             request,
             "callback_auth_failed",
@@ -1462,7 +1743,6 @@ async def oauth_callback(
             status_code=400,
         )
 
-    repo = server.services.repos.connector_repo
     row = repo.consume_oauth_state(state)
     if row is None:
         return _oauth_callback_html(
@@ -1473,6 +1753,15 @@ async def oauth_callback(
 
     base = resolve_public_base(request)
     redirect_uri = f"{base}/api/connectors/oauth/callback"
+    ctx = load_oauth_ctx(server.services.settings_repo, row.state_id)
+    composio_generation = str(ctx.get("composio_generation") or "")
+    if is_composio_kind(row.kind) and (
+        not composio_generation
+        or _composio_oauth_generation(server.services.settings_repo, int(row.user_id))
+        != composio_generation
+    ):
+        delete_oauth_ctx(server.services.settings_repo, row.state_id)
+        return _oauth_callback_html(request, "callback_invalid_state", status_code=400)
 
     try:
         tokens = await exchange_oauth_code(
@@ -1483,27 +1772,68 @@ async def oauth_callback(
             settings_repo=server.services.settings_repo,
             state_id=row.state_id,
         )
-        ctx = load_oauth_ctx(server.services.settings_repo, row.state_id)
         if ctx.get("client_id"):
             tokens["oauth_client_id"] = ctx["client_id"]
         if ctx.get("client_secret"):
             tokens["oauth_client_secret"] = ctx["client_secret"]
         delete_oauth_ctx(server.services.settings_repo, row.state_id)
     except Exception as exc:
-        logger.exception("oauth callback failed for %s", row.kind)
+        if is_composio_kind(row.kind):
+            logger.warning("Composio OAuth token exchange failed (%s)", type(exc).__name__)
+            delete_oauth_ctx(server.services.settings_repo, row.state_id)
+            detail = tr("connector.oauth.safe_upstream_error", resolve_request_locale(request))
+        else:
+            logger.exception("oauth callback failed for %s", row.kind)
+            detail = str(exc)
         return _oauth_callback_html(
             request,
             "callback_token_exchange_failed",
             status_code=400,
-            detail=str(exc),
+            detail=detail,
         )
+
+    if (
+        is_composio_kind(row.kind)
+        and _composio_oauth_generation(server.services.settings_repo, int(row.user_id))
+        != composio_generation
+    ):
+        return _oauth_callback_html(request, "callback_invalid_state", status_code=400)
 
     pending_payload: dict[str, Any] = {
         "user_id": row.user_id,
         "kind": row.kind,
-        "tokens": tokens,
     }
-    if row.kind == CUSTOM_MCP_KIND:
+    if is_composio_kind(row.kind):
+        try:
+            validation = await _composio_service(server).validate_oauth_tokens(tokens)
+            if (
+                _composio_oauth_generation(server.services.settings_repo, int(row.user_id))
+                != composio_generation
+            ):
+                return _oauth_callback_html(request, "callback_invalid_state", status_code=400)
+            connection = _composio_service(server).apply_oauth_tokens(
+                user_id=row.user_id,
+                tokens=tokens,
+                validation=validation,
+            )
+            _invalidate_connector_tool_cache(server, int(row.user_id))
+            _schedule_connector_reload(server, row.user_id)
+            pending_payload["applied"] = True
+            pending_payload["connection"] = connection
+            # Intentionally omit tokens — browser must not receive long-lived secrets.
+        except Exception as exc:
+            logger.warning("Composio OAuth validation or save failed (%s)", type(exc).__name__)
+            return _oauth_callback_html(
+                request,
+                "callback_save_failed",
+                status_code=400,
+                detail=tr(
+                    "connector.oauth.safe_upstream_error",
+                    resolve_request_locale(request),
+                ),
+            )
+    elif row.kind == CUSTOM_MCP_KIND:
+        pending_payload["tokens"] = tokens
         server_name = str(ctx.get("server_name") or "")
         issuer = str(ctx.get("issuer") or "")
         resource = str(ctx.get("resource") or "").strip() or None
@@ -1527,8 +1857,10 @@ async def oauth_callback(
                 status_code=400,
                 detail=str(exc),
             )
+    else:
+        pending_payload["tokens"] = tokens
 
-    # Store tokens in a short-lived settings key for frontend pickup, or auto-create instance.
+    # Store pending result for frontend pickup (Composio: no tokens).
     pending_key = f"connector.oauth.pending.{row.state_id}"
     server.services.settings_repo.set(
         pending_key,
@@ -1567,7 +1899,7 @@ async def oauth_pending(
     user: Any = Depends(current_user),
     server: Any = Depends(get_server),
 ) -> dict[str, Any]:
-    """Poll after OAuth redirect until credentials are ready for instance creation."""
+    """Poll after OAuth redirect until the server completes and validates the connection."""
     key = f"connector.oauth.pending.{state_id}"
     raw = server.services.settings_repo.get(key)
     if not raw:
@@ -1579,12 +1911,146 @@ async def oauth_pending(
     if int(data.get("user_id") or 0) != user.id:
         raise OctopError(ErrorCode.FORBIDDEN, "not your oauth session")
     server.services.settings_repo.delete(key)
+    kind = str(data.get("kind") or "")
+    if is_composio_kind(kind):
+        return {
+            "kind": kind,
+            "applied": bool(data.get("applied")),
+            "connection": data.get("connection"),
+        }
     return {
-        "kind": data.get("kind"),
+        "kind": kind,
         "tokens": data.get("tokens") or {},
         "server_name": data.get("server_name"),
         "applied": data.get("applied"),
     }
+
+
+class ComposioAppSearchBody(BaseModel):
+    query: str = Field(default="", max_length=200)
+
+
+class ComposioAppAuthBody(BaseModel):
+    toolkit: str = Field(..., min_length=1, max_length=120)
+
+
+@router.get(
+    "/connectors/composio",
+    response_model=ComposioGetResponse,
+    summary="Get personal Composio connection",
+)
+async def composio_get_connection(
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    """Return the current user's Composio connection (redacted) or disconnected."""
+    connection = _composio_service(server).get_connection(user.id)
+    if connection is None:
+        return {"connected": False, "connection": None}
+    return {"connected": True, "connection": connection}
+
+
+@router.post(
+    "/connectors/composio/check",
+    response_model=ComposioConnectionResponse,
+    summary="Check Composio connection health",
+    description="Validates the current user's saved Composio connection.",
+)
+async def composio_check_connection(
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    connection = await _composio_service(server).check_connection(user.id)
+    _invalidate_connector_tool_cache(server, int(user.id))
+    _schedule_connector_reload(server, int(user.id))
+    return {"connection": connection}
+
+
+@router.post(
+    "/connectors/composio/disable",
+    response_model=ComposioConnectionResponse,
+    summary="Disable Composio for new calls",
+)
+async def composio_disable(
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    _invalidate_composio_oauth_generation(server.services.settings_repo, int(user.id))
+    _invalidate_connector_tool_cache(server, int(user.id))
+    connection = _composio_service(server).set_usage(user.id, enabled=False)
+    _schedule_connector_reload(server, user.id)
+    return {"connection": connection}
+
+
+@router.post(
+    "/connectors/composio/enable",
+    response_model=ComposioConnectionResponse,
+    summary="Re-enable Composio after disable",
+)
+async def composio_enable(
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    _invalidate_connector_tool_cache(server, int(user.id))
+    connection = _composio_service(server).set_usage(user.id, enabled=True)
+    _schedule_connector_reload(server, user.id)
+    return {"connection": connection}
+
+
+@router.post(
+    "/connectors/composio/disconnect",
+    summary="Disconnect Composio from Octop",
+    description="Removes the local binding and invalidates pending authorization.",
+)
+async def composio_disconnect(
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    _invalidate_composio_oauth_generation(server.services.settings_repo, int(user.id))
+    _invalidate_connector_tool_cache(server, int(user.id))
+    if _composio_service(server).get_connection(user.id) is not None:
+        _composio_service(server).disconnect(user.id, actor_id=user.id, actor_role=str(user.role))
+    _schedule_connector_reload(server, user.id)
+    return {"ok": True}
+
+
+@router.post(
+    "/connectors/composio/apps/search",
+    response_model=ComposioAppSearchResponse,
+    summary="Search Composio apps",
+)
+async def composio_search_apps(
+    body: ComposioAppSearchBody,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    return await _composio_service(server).search_apps(user.id, body.query)
+
+
+@router.post(
+    "/connectors/composio/apps/authorize",
+    response_model=ComposioAppAuthResponse,
+    summary="Start Composio app authorization",
+)
+async def composio_authorize_app(
+    body: ComposioAppAuthBody,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    return await _composio_service(server).start_app_auth(user.id, body.toolkit)
+
+
+@router.get(
+    "/connectors/composio/apps/{toolkit}/status",
+    response_model=ComposioAppStatusResponse,
+    summary="Check Composio app authorization status",
+)
+async def composio_app_status(
+    toolkit: str,
+    user: Any = Depends(current_user),
+    server: Any = Depends(get_server),
+) -> dict[str, Any]:
+    return await _composio_service(server).check_app_status(user.id, toolkit)
 
 
 async def validate_chat_mcp_servers(

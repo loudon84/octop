@@ -17,6 +17,9 @@ _FINGERPRINT_KEYS = (
     "command",
     "args",
     "env",
+    # Bumped on Composio reconnect / credential rotation so cache cannot reuse
+    # tools from a previous account or generation.
+    "credential_gen",
 )
 
 
@@ -37,7 +40,12 @@ def fingerprint_mcp_spec(spec: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def wrap_tools_for_shared_use(tools: list[Any], lock: asyncio.Lock) -> list[Any]:
+def wrap_tools_for_shared_use(
+    tools: list[Any],
+    lock: asyncio.Lock,
+    *,
+    allow_call: Any = None,
+) -> list[Any]:
     """Return LangChain ``StructuredTool`` wrappers that serialize invoke/ainvoke.
 
     Must be real ``BaseTool`` instances so ``HarnessAgent.append_mcp_tools`` /
@@ -61,25 +69,31 @@ def wrap_tools_for_shared_use(tools: list[Any], lock: asyncio.Lock) -> list[Any]
         async def _acall(
             _tool: Any = tool,
             _lock: asyncio.Lock = lock,
+            _allow_call: Any = allow_call,
             **kwargs: Any,
         ) -> Any:
             async with _lock:
+                if _allow_call is not None and not await _allow_call():
+                    raise PermissionError("MCP connector is no longer available to this user")
                 return await _tool.ainvoke(kwargs)
 
         def _call(
             _tool: Any = tool,
             _lock: asyncio.Lock = lock,
+            _allow_call: Any = allow_call,
             **kwargs: Any,
         ) -> Any:
             async def _run() -> Any:
                 async with _lock:
+                    if _allow_call is not None and not await _allow_call():
+                        raise PermissionError("MCP connector is no longer available to this user")
                     return await _tool.ainvoke(kwargs)
 
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
                 return asyncio.run(_run())
-            return _tool.invoke(kwargs)
+            raise RuntimeError("sync MCP tool invoke cannot be called from a running event loop")
 
         st_kwargs: dict[str, Any] = {
             "name": name,

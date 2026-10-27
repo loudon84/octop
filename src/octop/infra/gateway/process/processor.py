@@ -858,7 +858,6 @@ class GlobalProcessor:
             user_id=user_id,
             explicit=None,
             apply_defaults=True,
-            raise_on_failure=False,
         )
         message_kwargs: dict[str, Any] = {}
         attachments = inbound_attachments_from_parts(msg.content)
@@ -892,6 +891,11 @@ class GlobalProcessor:
             auto_route=model_route.automatic,
             message_kwargs=message_kwargs or None,
         )
+        from octop.infra.agents.teams import is_team_agent  # noqa: PLC0415
+
+        if not is_team_agent(self._agent_manager.get_row(agent_id)):
+            request["connector_user_id"] = user_id
+            request["mcp_servers"] = mcp_servers or []
         self.teams.stamp_host_runtime(request, agent_id)
         self._attach_turn_knowledge_config(
             request,
@@ -1590,6 +1594,12 @@ class GlobalProcessor:
             message_kwargs=message_kwargs or None,
             reasoning_overrides=reasoning_overrides,
         )
+        from octop.infra.agents.teams import is_team_agent  # noqa: PLC0415
+
+        is_team_host = is_team_agent(self._agent_manager.get_row(agent_id))
+        if not is_team_host:
+            request["connector_user_id"] = user_id
+            request["mcp_servers"] = mcp_servers or []
         self.teams.stamp_host_runtime(request, agent_id)
         self._attach_turn_knowledge_config(
             request,
@@ -1602,8 +1612,9 @@ class GlobalProcessor:
             agent_id=agent_id,
         )
 
-        if mcp_servers:
-            request["mcp_servers"] = mcp_servers
+        explicit_mcp_selected = isinstance(meta.get("mcp_servers"), list)
+        if not is_team_host and (explicit_mcp_selected or mcp_servers):
+            request["mcp_servers"] = list(mcp_servers or [])
         if "skills" in meta:
             request["skills"] = meta["skills"]
         self._apply_turn_hitl_policy(thread_id, meta)
@@ -1753,16 +1764,12 @@ class GlobalProcessor:
         user_id: int,
         explicit: list[str] | None,
         apply_defaults: bool | None = None,
-        raise_on_failure: bool = True,
     ) -> list[str] | None:
-        """Merge turn picks with default_open and ensure tools are loaded.
+        """Resolve the turn's selected servers without mutating the agent graph.
 
-        Dashboard / HTTP paths should keep ``raise_on_failure=True`` so the
-        client sees a clear MCP load error. IM ingress uses ``False`` so a
-        flaky connector does not abort the whole message turn.
+        Tool preparation runs under the manager's per-agent execution lease.
         """
         from octop.infra.agents.teams import is_team_agent  # noqa: PLC0415
-        from octop.infra.errors import ErrorCode, OctopError  # noqa: PLC0415
 
         # Team hosts only dispatch — never attach MCP tools.
         if is_team_agent(self._agent_manager.get_row(agent_id)):
@@ -1776,22 +1783,6 @@ class GlobalProcessor:
             extra_defaults=extra_defaults,
         )
         if not merged:
-            return None
-        failed = await self._agent_manager.prepare_chat_mcp(
-            agent_id,
-            merged,
-            connector_user_id=user_id,
-        )
-        if failed:
-            detail = f"mcp load failed: {', '.join(failed)}"
-            if raise_on_failure:
-                raise OctopError(ErrorCode.CONNECTOR_MCP_LOAD_FAILED, detail)
-            logger.warning(
-                "skipping turn MCP for agent=%s user=%s (%s)",
-                agent_id,
-                user_id,
-                detail,
-            )
             return None
         return merged
 

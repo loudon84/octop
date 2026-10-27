@@ -35,3 +35,8 @@ export function navigateAuthWindow(
   }
   openExternalBrowserUrl(url);
 }
+
+/** Same-tab fallback when a popup is blocked before OAuth can start. */
+export function navigateCurrentTab(url: string): void {
+  window.location.assign(url);
+}

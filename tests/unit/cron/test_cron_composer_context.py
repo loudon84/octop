@@ -77,6 +77,8 @@ async def test_deliver_agent_stamps_composer_on_human_message() -> None:
             "connectors": ["github__1"],
             "model": "openai/gpt-4o-mini",
         }
+        assert request["connector_user_id"] == 1
+        assert request["mcp_servers"] == ["github__1"]
         yield {"type": "token", "content": "ok"}
 
     agent_manager = MagicMock()
@@ -102,7 +104,7 @@ async def test_deliver_agent_stamps_composer_on_human_message() -> None:
     )
     await service.deliver(_command(model="openai/gpt-4o-mini", mcp_servers=("github__1",)))
 
-    agent_manager.prepare_chat_mcp.assert_awaited()
+    agent_manager.prepare_chat_mcp.assert_not_awaited()
     gateway.push_session_text.assert_awaited_once()
     assert gateway.push_session_text.await_args.args[1] == "ok"
 
@@ -145,7 +147,7 @@ async def test_deliver_agent_merges_default_open_when_empty() -> None:
     agent_manager.merge_turn_mcp_servers.assert_called_once_with(
         1, None, apply_defaults=True, extra_defaults=[]
     )
-    agent_manager.prepare_chat_mcp.assert_awaited()
+    agent_manager.prepare_chat_mcp.assert_not_awaited()
     gateway.push_session_text.assert_awaited()
 
 
@@ -157,6 +159,7 @@ async def test_deliver_agent_skips_default_open_mcp_for_team_host() -> None:
     agent_row.kind = "team"
 
     async def _stream(_aid: str, request: dict):
+        assert "connector_user_id" not in request
         assert "mcp_servers" not in request
         yield {"type": "token", "content": "ok"}
 

@@ -68,6 +68,38 @@ export interface ConnectorInstance {
   updated_at: number;
 }
 
+export interface ComposioConnection {
+  instance_id: string;
+  kind: string;
+  display_name: string;
+  account_email?: string | null;
+  source: string;
+  mcp_server_name: string;
+  status: string;
+  auth_status: string;
+  health: string;
+  usage: string;
+  credential_gen: number;
+  last_checked_at?: number | null;
+  capabilities?: Record<string, boolean>;
+  default_open: boolean;
+  shared: boolean;
+  owner_user_id: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ComposioAppSummary {
+  toolkit: string;
+  name: string;
+  description: string;
+  source: string;
+}
+
+export type ComposioAppAuthorizationResult =
+  | { redirect_url: string }
+  | { status: "unknown" };
+
 export interface ConnectorCredentialsPreview {
   [key: string]: unknown;
   token_configured?: boolean;
@@ -283,10 +315,73 @@ export const connectorsApi = {
   oauthPending: (stateId: string) =>
     request<{
       kind: string;
-      tokens: Record<string, unknown>;
+      /** Only non-Composio OAuth flows return browser-readable token data. */
+      tokens?: Record<string, unknown>;
       server_name?: string;
       applied?: boolean;
+      connection?: ComposioConnection | null;
     }>(`/connectors/oauth/pending/${stateId}`),
+
+  oauthCancel: (stateId: string) =>
+    request<{ cancelled: boolean }>("/connectors/oauth/cancel", {
+      method: "POST",
+      body: JSON.stringify({ state_id: stateId }),
+    }),
+
+  composioGet: () =>
+    request<{ connected: boolean; connection: ComposioConnection | null }>(
+      "/connectors/composio",
+    ),
+
+  composioCheck: () =>
+    request<{ connection: ComposioConnection }>("/connectors/composio/check", {
+      method: "POST",
+    }),
+
+  composioDisable: () =>
+    request<{ connection: ComposioConnection }>(
+      "/connectors/composio/disable",
+      { method: "POST" },
+    ),
+
+  composioEnable: () =>
+    request<{ connection: ComposioConnection }>("/connectors/composio/enable", {
+      method: "POST",
+    }),
+
+  composioDisconnect: () =>
+    request<{ ok: boolean }>("/connectors/composio/disconnect", {
+      method: "POST",
+    }),
+
+  composioSearchApps: (query: string) =>
+    request<{
+      query: string;
+      apps: ComposioAppSummary[];
+      source: string;
+      partial: boolean;
+    }>("/connectors/composio/apps/search", {
+      method: "POST",
+      body: JSON.stringify({ query }),
+    }),
+
+  composioAuthorizeApp: (toolkit: string) =>
+    request<{
+      toolkit: string;
+      result: ComposioAppAuthorizationResult;
+      source: string;
+    }>("/connectors/composio/apps/authorize", {
+      method: "POST",
+      body: JSON.stringify({ toolkit }),
+    }),
+
+  composioAppStatus: (toolkit: string) =>
+    request<{
+      toolkit: string | null;
+      result: unknown;
+      source: string;
+      status: "unavailable" | "unknown" | string;
+    }>(`/connectors/composio/apps/${encodeURIComponent(toolkit)}/status`),
 
   authorizeUrl: (kind: string) =>
     request<{ authorize_url: string | null }>(

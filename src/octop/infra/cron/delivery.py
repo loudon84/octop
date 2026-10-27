@@ -223,15 +223,6 @@ class CronDeliveryService:
                     )
                     or []
                 )
-        if servers:
-            failed = await self._agent_manager.prepare_chat_mcp(
-                command.agent_id,
-                servers,
-                connector_user_id=session.user_id,
-            )
-            if failed:
-                raise RuntimeError(f"mcp load failed: {', '.join(failed)}")
-
         row = self._agent_manager.get_row(command.agent_id)
         default_model = (row.default_model if row is not None else None) or None
         composer = build_composer_context(
@@ -252,8 +243,9 @@ class CronDeliveryService:
             model=command.model,
             message_kwargs=message_kwargs,
         )
-        if servers:
-            request["mcp_servers"] = servers
+        if not is_team_agent(row):
+            request["connector_user_id"] = session.user_id
+            request["mcp_servers"] = servers or []
         self._attach_turn_knowledge_config(request, command, session)
         return request
 

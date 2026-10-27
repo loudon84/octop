@@ -244,4 +244,6 @@ def _normalize_tokens(
     }
     if body.get("token_type"):
         out["token_type"] = str(body["token_type"])
+    if body.get("id_token"):
+        out["id_token"] = str(body["id_token"])
     return out

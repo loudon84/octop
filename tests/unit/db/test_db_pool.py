@@ -108,6 +108,7 @@ def test_run_migrations_idempotent(db: SqlitePool):
     assert "permissions" in cols
     assert "workspace_root_dir" not in cols
     assert "token_quota" not in cols
+    assert "idx_connectors_composio_user" in connector_indexes
     assert "user_policies" in table_names
     assert "agent_team_members" not in table_names
     assert "kind" in agent_cols
@@ -180,6 +181,18 @@ def test_migration_022_preserves_v21_data_and_is_idempotent(db: SqlitePool) -> N
     assert version == 22
     assert tuple(user) == ("existing-v21-user", "hash")
     assert {"plugin_records", "plugin_credentials"}.issubset(tables)
+
+
+def test_v22_database_ensures_composio_singleton_index(db: SqlitePool) -> None:
+    with db.connect() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_connectors_composio_user")
+        conn.execute("UPDATE _schema_version SET version = 22")
+
+    run_migrations(db)
+
+    with db.connect() as conn:
+        indexes = {row["name"] for row in conn.execute("PRAGMA index_list(connectors)").fetchall()}
+    assert "idx_connectors_composio_user" in indexes
 
 
 def test_legacy_cron_trigger_column_renamed_to_schedule_spec(tmp_path: Path) -> None:

@@ -344,7 +344,9 @@
       "callback_invalid_state": "Invalid or expired authorization state.",
       "callback_token_exchange_failed": "Token exchange failed: {detail}",
       "callback_save_failed": "Failed to save authorization: {detail}",
-      "callback_success": "Authorization complete. You may close this window."
+      "callback_success": "Authorization complete. You may close this window.",
+      "authorization_denied": "Authorization was not completed.",
+      "safe_upstream_error": "Composio could not complete the authorization request."
     },
     "agently": {
       "login_failed": "Authorization failed. Start authorization again.",
@@ -448,6 +450,9 @@
     "CONNECTOR_NOT_BOUND": "Connector is not bound to this agent.",
     "CONNECTOR_ALREADY_BOUND": "Connector is already bound.",
     "CONNECTOR_MCP_LOAD_FAILED": "Failed to load tools for MCP server(s): {servers}",
+    "COMPOSIO_SHARE_FORBIDDEN": "Personal Composio connections cannot be shared.",
+    "COMPOSIO_DEFAULT_OPEN_FORBIDDEN": "Composio cannot be enabled by default for every conversation.",
+    "COMPOSIO_UPSTREAM_UNAVAILABLE": "Composio cloud is temporarily unavailable. Retry or reconnect.",
     "BRIDGE_NOT_FOUND": "Cloud collab connection not found.",
     "BRIDGE_AUTH_FAILED": "Peer Octop rejected the credentials. Check the address, username, and password — or use Probe to verify the account first.",
     "BRIDGE_PEER_UNREACHABLE": "Could not reach the peer Octop instance. Confirm the URL is reachable, credentials are correct, and the peer has cloud collab support (needs /api/bridge/ws). If the peer is behind NAT, initiate the link from the side that can reach the other.",

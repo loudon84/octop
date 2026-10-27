@@ -247,20 +247,6 @@ async def prepare_dashboard_turn(
         user=user,
         names=turn.skills,
     )
-    if mcp_servers:
-        failed = await server.app_runtime.agent_registry.prepare_chat_mcp(
-            agent_id,
-            mcp_servers,
-            connector_user_id=user.id,
-        )
-        if failed:
-            locale = getattr(user, "locale", None) or "zh"
-            raise OctopError.localized(
-                ErrorCode.CONNECTOR_MCP_LOAD_FAILED,
-                locale,
-                servers=", ".join(failed),
-            )
-
     thread_registry = server.app_runtime.gateway.thread_registry
     thread_id, session_key = await resolve_thread_id(
         agent_id=agent_id,
@@ -354,6 +340,7 @@ def build_dashboard_inbound(
         "session_key": prepared.session_key,
         "thread_id": prepared.thread_id,
         "user_is_admin": user_is_admin,
+        "connector_user_id": user_id,
     }
     if prepared.mcp_servers is not None:
         # Including [] — Dashboard opt-out of default_open for this turn.

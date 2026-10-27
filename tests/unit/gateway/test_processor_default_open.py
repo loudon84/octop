@@ -9,7 +9,6 @@ import pytest
 from langchain_core.messages import HumanMessage
 from octop_gateway.models import ChannelSubject, InboundMessage, TextContent
 
-from octop.infra.errors import ErrorCode, OctopError
 from octop.infra.gateway.process.message_keys import USER_INPUT_KEY
 from octop.infra.gateway.process.processor import GlobalProcessor
 from octop.infra.gateway.slash.dispatcher import SlashDispatcher
@@ -76,7 +75,7 @@ async def test_im_call_merges_default_open_mcp_servers() -> None:
     agent_manager.merge_turn_mcp_servers.assert_called_once_with(
         7, None, apply_defaults=True, extra_defaults=[]
     )
-    agent_manager.prepare_chat_mcp.assert_awaited_once()
+    agent_manager.prepare_chat_mcp.assert_not_awaited()
     assert captured["request"]["mcp_servers"] == ["docs__1"]
 
 
@@ -186,6 +185,7 @@ async def test_dashboard_request_ignores_explicit_mcp_for_team_host() -> None:
         meta=msg.metadata or {},
     )
     assert "mcp_servers" not in request
+    assert "connector_user_id" not in request
     agent_manager.merge_turn_mcp_servers.assert_not_called()
     agent_manager.prepare_chat_mcp.assert_not_awaited()
 
@@ -235,7 +235,7 @@ async def test_dashboard_request_trusts_explicit_opt_out() -> None:
         thread_id="thr",
         meta=msg.metadata or {},
     )
-    assert "mcp_servers" not in request
+    assert request["mcp_servers"] == []
     agent_manager.merge_turn_mcp_servers.assert_called_once_with(
         1, [], apply_defaults=False, extra_defaults=[]
     )
@@ -316,7 +316,7 @@ async def test_dashboard_request_attaches_knowledge_base_ids_without_prepending(
 
 
 @pytest.mark.asyncio
-async def test_resolve_turn_mcp_servers_raises_when_prepare_fails() -> None:
+async def test_resolve_turn_mcp_servers_defers_preparation_until_leased_turn() -> None:
     agent_manager = MagicMock()
     agent_manager.merge_turn_mcp_servers = MagicMock(return_value=["bad__1"])
     agent_manager.prepare_chat_mcp = AsyncMock(return_value=["bad__1"])
@@ -334,10 +334,9 @@ async def test_resolve_turn_mcp_servers_raises_when_prepare_fails() -> None:
         gateway=None,
     )
 
-    with pytest.raises(OctopError) as ei:
-        await processor._resolve_turn_mcp_servers(
-            agent_id="a1",
-            user_id=1,
-            explicit=None,
-        )
-    assert ei.value.code == ErrorCode.CONNECTOR_MCP_LOAD_FAILED
+    assert await processor._resolve_turn_mcp_servers(
+        agent_id="a1",
+        user_id=1,
+        explicit=None,
+    ) == ["bad__1"]
+    agent_manager.prepare_chat_mcp.assert_not_awaited()

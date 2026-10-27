@@ -1085,3 +1085,81 @@
 .customMcpFooterSaveOnly {
   justify-content: flex-end;
 }
+
+.composioTab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.composioCard {
+  border: 1px solid var(--fn-border-secondary);
+  border-radius: var(--fn-radius-lg);
+  background: var(--fn-bg-primary);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.composioCardHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.composioMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.composioActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.composioSearchRow {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.composioAppList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composioAppItem {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  text-align: left;
+  border: 1px solid var(--fn-border-secondary);
+  border-radius: var(--fn-radius-md);
+  background: var(--fn-bg-secondary);
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.composioAppItem span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composioAppItem small,
+.composioAppItem em {
+  color: var(--fn-text-tertiary);
+  font-style: normal;
+  font-size: 12px;
+}
+
+.composioDetail code {
+  font-size: 12px;
+}

@@ -18,6 +18,7 @@ from octop.infra.connectors.catalog import (
 )
 from octop.infra.connectors.custom_mcp import validate_mcp_http_url
 from octop.infra.connectors.mail_servers import resolve_mail_servers
+from octop.infra.db.repos.connectors import ConnectorRepo
 from octop.infra.utils.ulid import new_ulid
 
 # MCP Streamable HTTP transport (Notion, etc.) requires both content types.
@@ -99,9 +100,10 @@ def build_http_mcp_spec(
     instance_id: str,
     creds: dict[str, Any],
     config: OctopConfig,
+    instance_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if entry.mcp_mode == "remote":
-        return _build_remote_spec(entry, creds)
+        return _build_remote_spec(entry, creds, instance_config=instance_config)
     if entry.mcp_mode == "stdio":
         return _build_stdio_spec(entry, creds)
     return _build_gateway_spec(entry, instance_id, creds, config)
@@ -130,7 +132,12 @@ def _build_stdio_spec(entry: ConnectorCatalogEntry, creds: dict[str, Any]) -> di
     raise ValueError(f"unsupported stdio connector kind: {entry.kind}")
 
 
-def _build_remote_spec(entry: ConnectorCatalogEntry, creds: dict[str, Any]) -> dict[str, Any]:
+def _build_remote_spec(
+    entry: ConnectorCatalogEntry,
+    creds: dict[str, Any],
+    *,
+    instance_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if entry.kind == "didi":
         api_key = str(creds.get("api_key") or "").strip()
         return {
@@ -225,11 +232,18 @@ def _build_remote_spec(entry: ConnectorCatalogEntry, creds: dict[str, Any]) -> d
         }
         if entry.mcp_user_agent:
             headers["User-Agent"] = entry.mcp_user_agent
-        return {
+        oauth_spec: dict[str, Any] = {
             "transport": "http",
             "url": mcp_url,
             "headers": headers,
         }
+        cfg = instance_config or {}
+        if cfg.get("credential_gen") is not None:
+            try:
+                oauth_spec["credential_gen"] = int(cfg["credential_gen"])
+            except (TypeError, ValueError):
+                oauth_spec["credential_gen"] = 0
+        return oauth_spec
     raise ValueError(f"unsupported remote connector kind: {entry.kind}")
 
 
@@ -612,6 +626,7 @@ def build_mcp_server_configs_for_user(
                 instance_id=inst.instance_id,
                 creds=creds,
                 config=config,
+                instance_config=ConnectorRepo.parse_config_json(inst),
             )
             if log:
                 logger.info(
