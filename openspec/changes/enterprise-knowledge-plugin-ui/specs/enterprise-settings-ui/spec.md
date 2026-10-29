@@ -20,6 +20,11 @@ Enterprise forms SHALL render inside fixed settings surfaces on existing connect
 - **WHEN** a user without management permission reaches the settings entry
 - **THEN** administrative inputs and actions are unavailable and no secrets or unauthorized metadata are fetched
 
+#### Scenario: Connector tabs isolate their visible content
+- **WHEN** a user switches among connected, builtin, Composio, and custom MCP tabs
+- **THEN** the tab selection, URL query, and visible connector content MUST agree; the generic plugin settings slot MUST be visible only in the connected tab
+- **AND** switching tabs and returning MUST preserve unsaved plugin settings drafts; hidden settings MUST NOT remain exposed to pointer or accessibility navigation
+
 ### Requirement: Management roles are separated
 The system MUST restrict connection, employee grants and search administration to admins. A non-admin expert configurator MUST have existing agent_plugins management permission and own the target expert to read/update its binding/defaults/web allowance. Other employees MUST receive no management bootstrap data or management inputs.
 
